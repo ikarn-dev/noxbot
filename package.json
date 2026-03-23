@@ -1,0 +1,52 @@
+{
+  "name": "nox-telegram-bot",
+  "version": "0.1.0",
+  "description": "Solana memecoin sniper Telegram bot — sub-50ms execution via Jito bundles, KOL intelligence, threat-gated trading",
+  "main": "src/unified-server.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node src/unified-server.js",
+    "start:engine": "node src/snipe-engine.js",
+    "start:bot": "node src/bot/index.js",
+    "start:api": "node src/api/server.js",
+    "dev": "NODE_ENV=development node src/unified-server.js",
+    "test": "node --test",
+    "test:edge": "node --test test/edge-cases.test.js",
+    "test:all": "node --test test/",
+    "test:templates": "node scripts/test-templates.js",
+    "test:latency": "node scripts/latency-benchmark.js",
+    "preflight:devnet": "node scripts/devnet-checklist.js",
+    "preflight:mainnet": "node scripts/mainnet-preflight.js",
+    "lint": "eslint src/"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.0",
+    "axios": "^1.7.0",
+    "bs58": "^5.0.0",
+    "dotenv": "^16.4.0",
+    "express": "^4.19.0",
+    "ioredis": "^5.4.0",
+    "mongoose": "^8.3.0",
+    "p-queue": "^8.0.0",
+    "pino": "^9.1.0",
+    "pino-pretty": "^11.0.0",
+    "speakeasy": "^2.0.0",
+    "telegraf": "^4.16.0"
+  },
+  "devDependencies": {
+    "eslint": "^9.0.0"
+  },
+  "keywords": [
+    "solana",
+    "memecoin",
+    "sniper",
+    "telegram",
+    "bot",
+    "jito",
+    "kol"
+  ],
+  "license": "UNLICENSED",
+  "private": true
+}
