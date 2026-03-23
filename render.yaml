@@ -1,0 +1,41 @@
+services:
+  - type: web
+    name: nox-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    region: oregon
+    plan: free
+    branch: main
+    autoDeploy: true
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: BOT_TOKEN
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: HELIUS_API_KEY
+        sync: false
+      - key: HELIUS_WEBHOOK_SECRET
+        sync: false
+      - key: HMAC_SECRET
+        sync: false
+      - key: API_SECRET
+        sync: false
+      - key: API_PORT
+        value: "3099"
+      - key: SOLANA_NETWORK
+        value: devnet
+      - key: SOLANA_RPC_URL
+        value: https://api.devnet.solana.com
+      - key: LOG_LEVEL
+        value: info
+      - key: MIN_TRADE_AMOUNT_SOL
+        value: "0.01"
+      - key: MAX_SNIPE_AMOUNT_SOL
+        value: "0.5"
+      - key: MAX_WALLETS_PER_USER
+        value: "5"

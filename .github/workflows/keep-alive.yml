@@ -1,0 +1,21 @@
+name: Keep Alive — Ping Render
+
+on:
+  schedule:
+    # Every 14 minutes — Render sleeps after 15 min of inactivity
+    - cron: '*/14 * * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping health endpoint
+        run: |
+          response=$(curl -s -o /dev/null -w "%{http_code}" "${{ secrets.RENDER_HEALTH_URL }}" --max-time 30 || true)
+          echo "Health check response: $response"
+          if [ "$response" = "200" ]; then
+            echo "✅ Bot is alive"
+          else
+            echo "⚠️ Bot returned $response — may be waking up"
+          fi
