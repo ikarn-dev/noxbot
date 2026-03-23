@@ -82,4 +82,5 @@ module.exports = {
   signCallback,
   parseCallback,
   callbackVerifierMiddleware,
+  verifyCallback: callbackVerifierMiddleware,
 };
