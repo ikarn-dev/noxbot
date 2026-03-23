@@ -95,8 +95,8 @@ const SignalSchema = new Schema({
   detectedSlot: { type: Number, default: null },
   source: {
     type: String,
-    enum: ['yellowstone_grpc', 'manual_scan', 'kol_copy'],
-    default: 'yellowstone_grpc',
+    enum: ['yellowstone_grpc', 'helius', 'dexscreener', 'manual_scan', 'kol_copy'],
+    default: 'helius',
   },
 
   // Lifecycle
