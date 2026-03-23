@@ -10,7 +10,8 @@
 
 const { Scenes, Markup } = require('telegraf');
 const { Keypair }        = require('@solana/web3.js');
-const bs58               = require('bs58');
+const _bs58              = require('bs58');
+const bs58               = _bs58.default || _bs58; // bs58 v5 is ESM, require() wraps it
 const log                = require('../../config/logger').child({ module: 'scene:onboarding' });
 const User               = require('../../models/User');
 

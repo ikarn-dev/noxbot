@@ -33,6 +33,11 @@ function authMiddleware() {
       return next();
     }
 
+    // Allow onboarding callback buttons (scene context may not be set for callbacks)
+    if (ctx.callbackQuery?.data?.startsWith('onboard_')) {
+      return next();
+    }
+
     // Session must exist
     if (!ctx.session) {
       log.warn({ telegramId: ctx.from?.id }, 'no session');
