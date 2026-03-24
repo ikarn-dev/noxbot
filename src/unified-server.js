@@ -30,13 +30,15 @@ async function tg(method, body = {}) {
   });
   const data = await res.json();
   if (!data.ok) log.warn({ method, error: data.description }, 'TG API error');
+  // Auto-track sent messages for /clear
+  if (method === 'sendMessage' && data.result?.message_id && body.chat_id) {
+    trackMsg(body.chat_id, data.result.message_id);
+  }
   return data.result;
 }
 
 async function reply(chatId, text, opts = {}) {
-  const result = await tg('sendMessage', { chat_id: chatId, text, parse_mode: 'Markdown', ...opts });
-  if (result?.message_id) trackMsg(chatId, result.message_id);
-  return result;
+  return tg('sendMessage', { chat_id: chatId, text, parse_mode: 'Markdown', ...opts });
 }
 
 // ─── Message Tracker (for /clear) ──────────────────
@@ -148,12 +150,11 @@ async function handleUpdate(update) {
       if (data === 'cmd_wallets') return handleWallets(chatId, sess);
       if (data === 'cmd_settings') return handleSettings(chatId, sess, ['settings']);
       if (data === 'cmd_kols') return handleKols(chatId);
-      if (data === 'cmd_copy') return handleCopy(chatId, sess);
+      if (data === 'cmd_copy') return handleCopy(chatId, sess, null);
       if (data === 'cmd_clearall') return handleClearAll(chatId);
 
-      // Token card buttons
+      // Token card buttons — IMPORTANT: sell_pct_ must be checked BEFORE sell_ prefix
       if (data.startsWith('buy_')) return handleBuy(chatId, sess, data.slice(4));
-      if (data.startsWith('sell_')) return handleSell(chatId, sess, data.slice(5));
       if (data.startsWith('snipe_')) return handleSnipe(chatId, sess, data.slice(6));
       if (data.startsWith('token_')) return handleToken(chatId, data.slice(6));
 
@@ -169,6 +170,9 @@ async function handleUpdate(update) {
       // Copy toggle/remove: copy_toggle_<wallet>, copy_remove_<wallet>
       if (data.startsWith('copy_toggle_')) return handleCopyToggle(chatId, data.slice(12));
       if (data.startsWith('copy_remove_')) return handleCopyRemove(chatId, data.slice(12));
+
+      // Sell buttons — check AFTER sell_pct_ to avoid prefix collision
+      if (data.startsWith('sell_')) return handleSell(chatId, sess, data.slice(5));
     }
   } catch (err) {
     log.error({ error: err.message }, 'Update handler error');
@@ -179,7 +183,10 @@ async function handleUpdate(update) {
 
 async function handleStart(chatId, sess) {
   if (sess.wallets?.length > 0) {
-    return reply(chatId, `Welcome back to *Nox* ⚡\n\nActive wallet: \`${sess.activeWallet?.slice(0, 8)}...\`\nUse /help for commands.`);
+    const active = sess.activeWallet || sess.wallets[0].publicKey;
+    return reply(chatId,
+      `Welcome back to *Nox* ⚡\n\nActive wallet:\n\`${active}\`\n\nUse /help for commands.`
+    );
   }
 
   return tg('sendMessage', {
@@ -430,14 +437,43 @@ async function handleWallets(chatId, sess) {
   const wallets = sess.wallets || [];
   const active = sess.activeWallet;
 
-  const rows = wallets.map((w, i) => {
-    const addr = w.publicKey.slice(0, 8) + '...' + w.publicKey.slice(-4);
+  const rows = [];
+  for (let i = 0; i < wallets.length; i++) {
+    const w = wallets[i];
     const isActive = w.publicKey === active ? ' ✅' : '';
     const label = w.label || `Wallet ${i + 1}`;
-    return `${i + 1}. \`${addr}\` — ${label}${isActive}`;
-  });
 
-  await reply(chatId, '🔑 *Wallets*\n\n' + rows.join('\n') + '\n\nUse /start to add a new wallet.');
+    // Fetch live SOL balance
+    let balanceStr = 'N/A';
+    try {
+      const rpcUrl = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
+      const res = await fetch(rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 1,
+          method: 'getBalance',
+          params: [w.publicKey],
+        }),
+      });
+      const data = await res.json();
+      if (data.result?.value !== undefined) {
+        balanceStr = (data.result.value / 1e9).toFixed(4) + ' SOL';
+      }
+    } catch { /* RPC unavailable */ }
+
+    rows.push(
+      `${isActive ? '✅' : '🔑'} *${label}*${isActive}\n` +
+      `\`${w.publicKey}\`\n` +
+      `💰 Balance: \`${balanceStr}\``
+    );
+  }
+
+  await reply(chatId,
+    '🔑 *Your Wallets*\n━━━━━━━━━━━━━━━━━━\n\n' +
+    rows.join('\n\n') +
+    '\n\n_Tap the address to copy._\nUse /start to add a new wallet.'
+  );
 }
 
 const SETTINGS_MAP = {
