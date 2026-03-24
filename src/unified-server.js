@@ -84,16 +84,32 @@ async function handleUpdate(update) {
       }
 
       // Commands
-      if (text === '/start') return handleStart(chatId, sess);
-      if (text === '/help') return handleHelp(chatId);
+      const parts = text.split(/\s+/);
+      const cmd = parts[0].split('@')[0].toLowerCase();
 
-      // Other commands
-      const cmd = text.split(/\s/)[0].toLowerCase();
+      if (cmd === '/start') return handleStart(chatId, sess);
+      if (cmd === '/help' || cmd === '/h') return handleHelp(chatId);
+
+      // Everything below requires wallet
+      if (!sess.wallets?.length) {
+        return reply(chatId, '🔑 No wallet set up yet. Use /start first.');
+      }
+
+      if (cmd === '/wallets') return handleWallets(chatId, sess);
+      if (cmd === '/settings' || cmd === '/set') return handleSettings(chatId, sess, parts);
+      if (cmd === '/dryrun') return handleDryrun(chatId, sess, parts[1]);
+      if (cmd === '/pnl') return handlePnl(chatId, parts[1]);
+      if (cmd === '/positions' || cmd === '/pos') return handlePositions(chatId);
+      if (cmd === '/kols') return handleKols(chatId);
+      if (cmd === '/token') return handleToken(chatId, parts[1]);
+      if (cmd === '/buy' || cmd === '/b') return handleBuy(chatId, sess, parts[1], parts[2]);
+      if (cmd === '/sell') return handleSell(chatId, sess, parts[1], parts[2]);
+      if (cmd === '/snipe' || cmd === '/s') return handleSnipe(chatId, sess, parts[1], parts[2]);
+      if (cmd === '/copy') return handleCopy(chatId, sess, parts[1]);
+      if (cmd === '/refresh') return handleStart(chatId, sess);
+
       if (cmd.startsWith('/')) {
-        if (!sess.wallets?.length) {
-          return reply(chatId, '🔑 No wallet set up yet. Use /start first.');
-        }
-        return reply(chatId, `⚙️ \`${cmd}\` coming soon. Use /help to see available commands.`);
+        return reply(chatId, `Unknown command. Use /help.`);
       }
     }
 
@@ -106,6 +122,33 @@ async function handleUpdate(update) {
 
       if (data === 'onboard_generate') return handleGenerate(chatId, sess);
       if (data === 'onboard_import') return handleImport(chatId, sess);
+
+      // Help menu buttons
+      if (data === 'cmd_positions') return handlePositions(chatId);
+      if (data === 'cmd_pnl') return handlePnl(chatId, '7d');
+      if (data === 'cmd_wallets') return handleWallets(chatId, sess);
+      if (data === 'cmd_settings') return handleSettings(chatId, sess, ['settings']);
+      if (data === 'cmd_kols') return handleKols(chatId);
+      if (data === 'cmd_copy') return handleCopy(chatId, sess);
+
+      // Token card buttons
+      if (data.startsWith('buy_')) return handleBuy(chatId, sess, data.slice(4));
+      if (data.startsWith('sell_')) return handleSell(chatId, sess, data.slice(5));
+      if (data.startsWith('snipe_')) return handleSnipe(chatId, sess, data.slice(6));
+      if (data.startsWith('token_')) return handleToken(chatId, data.slice(6));
+
+      // Sell percentage buttons: sell_pct_<mint>_<pct>
+      if (data.startsWith('sell_pct_')) {
+        const rest = data.slice(9);
+        const lastUnderscore = rest.lastIndexOf('_');
+        const mint = rest.slice(0, lastUnderscore);
+        const pct = parseInt(rest.slice(lastUnderscore + 1), 10);
+        return handleSellExecute(chatId, sess, mint, pct);
+      }
+
+      // Copy toggle/remove: copy_toggle_<wallet>, copy_remove_<wallet>
+      if (data.startsWith('copy_toggle_')) return handleCopyToggle(chatId, data.slice(12));
+      if (data.startsWith('copy_remove_')) return handleCopyRemove(chatId, data.slice(12));
     }
   } catch (err) {
     log.error({ error: err.message }, 'Update handler error');
@@ -207,18 +250,55 @@ async function handleKeyImport(chatId, keyInput, msgId, sess) {
 }
 
 async function handleHelp(chatId) {
-  await reply(chatId,
-    '*Nox Commands* ⚡\n\n' +
-    '/start — Setup wallet\n' +
-    '/help — This message\n' +
-    '/wallets — Manage wallets\n' +
-    '/buy <mint> — Buy token\n' +
-    '/sell <mint> — Sell token\n' +
-    '/positions — View positions\n' +
-    '/pnl — Profit & loss\n' +
-    '/settings — Bot settings\n' +
-    '/dryrun — Toggle dry run'
-  );
+  await tg('sendMessage', {
+    chat_id: chatId,
+    text:
+      '🌑 *Nox — Solana Sniper Bot*\n' +
+      '━━━━━━━━━━━━━━━━━━\n\n' +
+
+      '💰 *Trading*\n' +
+      '  /buy `<mint>` — Buy a token\n' +
+      '  /sell `<mint>` — Sell (with % buttons)\n' +
+      '  /snipe `<mint>` — Priority snipe (Jito)\n' +
+      '  /token `<mint>` — Live token details\n\n' +
+
+      '📊 *Portfolio*\n' +
+      '  /positions — Open positions\n' +
+      '  /pnl `[24h|7d|30d]` — Profit & loss\n\n' +
+
+      '🏆 *Intelligence*\n' +
+      '  /kols — KOL leaderboard\n' +
+      '  /copy `<wallet>` — Copy-trade a wallet\n\n' +
+
+      '🔑 *Wallet*\n' +
+      '  /wallets — View wallets\n' +
+      '  /start — Add new wallet\n\n' +
+
+      '⚙️ *Config*\n' +
+      '  /settings — View all settings\n' +
+      '  /set `<key> <value>` — Change setting\n' +
+      '  /dryrun — Toggle dry run\n\n' +
+
+      '━━━━━━━━━━━━━━━━━━\n' +
+      '🧪 Dry Run is *ON* by default — no real SOL spent.',
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: '📊 Positions', callback_data: 'cmd_positions' },
+          { text: '📈 PnL', callback_data: 'cmd_pnl' },
+        ],
+        [
+          { text: '🏆 KOLs', callback_data: 'cmd_kols' },
+          { text: '📋 Copy Trading', callback_data: 'cmd_copy' },
+        ],
+        [
+          { text: '🔑 Wallets', callback_data: 'cmd_wallets' },
+          { text: '⚙️ Settings', callback_data: 'cmd_settings' },
+        ],
+      ],
+    },
+  });
 }
 
 function defaultSettings() {
@@ -242,6 +322,420 @@ async function saveUser(chatId, sess) {
     log.info({ chatId, wallet: w.publicKey }, 'User saved');
   } catch (err) {
     log.error({ error: err.message }, 'User save failed');
+  }
+}
+
+// ─── Command Handlers ──────────────────────────────
+
+async function handleWallets(chatId, sess) {
+  const wallets = sess.wallets || [];
+  const active = sess.activeWallet;
+
+  const rows = wallets.map((w, i) => {
+    const addr = w.publicKey.slice(0, 8) + '...' + w.publicKey.slice(-4);
+    const isActive = w.publicKey === active ? ' ✅' : '';
+    const label = w.label || `Wallet ${i + 1}`;
+    return `${i + 1}. \`${addr}\` — ${label}${isActive}`;
+  });
+
+  await reply(chatId, '🔑 *Wallets*\n\n' + rows.join('\n') + '\n\nUse /start to add a new wallet.');
+}
+
+const SETTINGS_MAP = {
+  slippage:    { key: 'slippage',    min: 50,   max: 5000,       unit: 'bps',      label: 'Slippage' },
+  jitotip:     { key: 'jitoTip',     min: 1000, max: 100000000,  unit: 'lamports',  label: 'Jito Tip' },
+  snipeamount: { key: 'snipeAmount', min: 0.01, max: 10,         unit: 'SOL',       label: 'Snipe Amount' },
+  autosell:    { key: 'autoSell',    type: 'bool',               label: 'Auto-Sell' },
+  takeprofit:  { key: 'takeProfit',  min: 10,   max: 10000,      unit: '%',         label: 'Take Profit' },
+  stoploss:    { key: 'stopLoss',    min: 1,    max: 99,         unit: '%',         label: 'Stop Loss' },
+  dryrun:      { key: 'dryRun',      type: 'bool',               label: 'Dry Run' },
+};
+
+async function handleSettings(chatId, sess, parts) {
+  const settingKey = (parts[1] || '').toLowerCase();
+  const value = parts[2] || null;
+
+  if (!settingKey) {
+    const s = sess.settings || {};
+    const lines = Object.entries(SETTINGS_MAP).map(([k, cfg]) => {
+      const current = s[cfg.key] ?? 'default';
+      return `• *${cfg.label}*: \`${current}\`${cfg.unit ? ` ${cfg.unit}` : ''}`;
+    });
+    return reply(chatId, '⚙️ *Settings*\n\n' + lines.join('\n') + '\n\n`/set <key> <value>` to change.\nKeys: ' + Object.keys(SETTINGS_MAP).join(', '));
+  }
+
+  const cfg = SETTINGS_MAP[settingKey];
+  if (!cfg) return reply(chatId, '❌ Unknown setting. Available: ' + Object.keys(SETTINGS_MAP).join(', '));
+  if (!value) return reply(chatId, `📖 Usage: \`/set ${settingKey} <value>\``);
+
+  if (!sess.settings) sess.settings = defaultSettings();
+
+  if (cfg.type === 'bool') {
+    sess.settings[cfg.key] = value === 'on' || value === 'true';
+    return reply(chatId, `✅ *${cfg.label}* set to \`${sess.settings[cfg.key] ? 'ON' : 'OFF'}\``);
+  }
+
+  const parsed = parseFloat(value);
+  if (isNaN(parsed) || parsed < cfg.min || parsed > cfg.max) {
+    return reply(chatId, `❌ ${cfg.label} must be ${cfg.min}–${cfg.max} ${cfg.unit}.`);
+  }
+  sess.settings[cfg.key] = parsed;
+  return reply(chatId, `✅ *${cfg.label}* set to \`${parsed} ${cfg.unit}\``);
+}
+
+async function handleDryrun(chatId, sess, arg) {
+  if (!sess.settings) sess.settings = defaultSettings();
+  const a = (arg || '').toLowerCase();
+  if (a === 'on' || a === 'true') sess.settings.dryRun = true;
+  else if (a === 'off' || a === 'false') sess.settings.dryRun = false;
+  else sess.settings.dryRun = !sess.settings.dryRun;
+
+  const on = sess.settings.dryRun;
+  await reply(chatId,
+    `🧪 Dry Run: *${on ? 'ON' : 'OFF'}*\n\n` +
+    (on ? 'All trades will be simulated — no real SOL spent.' : '⚠️ Trades are now *LIVE* — real SOL will be used.')
+  );
+}
+
+async function handlePnl(chatId, period) {
+  try {
+    await ensureMongo();
+    const Trade = require('./models/Trade');
+    const periods = { '24h': 864e5, '7d': 6048e5, '30d': 2592e6, 'all': null };
+    const p = period || '7d';
+    if (!periods.hasOwnProperty(p)) return reply(chatId, '📖 Usage: `/pnl [24h|7d|30d|all]`');
+
+    const query = { telegramId: chatId, status: 'filled', type: 'sell' };
+    const ms = periods[p];
+    if (ms) query.createdAt = { $gte: new Date(Date.now() - ms) };
+
+    const trades = await Trade.find(query).lean();
+    if (!trades.length) return reply(chatId, `📊 No completed trades in ${p}.`);
+
+    let total = 0, wins = 0, losses = 0;
+    for (const t of trades) { const pnl = t.realisedPnlSol || 0; total += pnl; pnl > 0 ? wins++ : losses++; }
+    const wr = ((wins / trades.length) * 100).toFixed(1);
+    const e = total >= 0 ? '🟢' : '🔴';
+
+    await reply(chatId,
+      `📊 *PnL Summary (${p})*\n\n` +
+      `${e} Total: ${total >= 0 ? '+' : ''}${total.toFixed(4)} SOL\n` +
+      `📈 Win Rate: ${wr}%\n✅ ${wins} | ❌ ${losses} | 📝 ${trades.length}`
+    );
+  } catch (err) {
+    log.error({ error: err.message }, 'pnl failed');
+    await reply(chatId, '⚠️ Could not calculate PnL.');
+  }
+}
+
+async function handlePositions(chatId) {
+  try {
+    await ensureMongo();
+    const Trade = require('./models/Trade');
+    const positions = await Trade.find({
+      telegramId: chatId, status: 'filled', type: 'buy', closedAt: { $exists: false },
+    }).sort({ createdAt: -1 }).limit(20).lean();
+
+    if (!positions.length) return reply(chatId, '📭 No open positions.\n\nUse /buy to open one.');
+
+    const rows = positions.map(p => {
+      const mint = p.mint?.slice(0, 8) + '...';
+      const entry = p.amountSol?.toFixed(4) || '?';
+      return `⚪ \`${mint}\` — ${entry} SOL`;
+    });
+
+    await reply(chatId, '📊 *Open Positions*\n\n' + rows.join('\n'));
+  } catch (err) {
+    log.error({ error: err.message }, 'positions failed');
+    await reply(chatId, '⚠️ Could not load positions.');
+  }
+}
+
+// ─── On-Demand Data Fetchers ───────────────────────
+
+async function fetchTokenFromDex(mint) {
+  try {
+    const res = await fetch(`https://api.dexscreener.com/latest/dex/tokens/${mint}`);
+    const data = await res.json();
+    if (data.pairs?.length > 0) {
+      const p = data.pairs[0];
+      return {
+        name: p.baseToken?.name || 'Unknown',
+        symbol: p.baseToken?.symbol || '???',
+        price: p.priceUsd || 'N/A',
+        priceChange24h: p.priceChange?.h24 || 0,
+        volume24h: p.volume?.h24 || 0,
+        liquidity: p.liquidity?.usd || 0,
+        fdv: p.fdv || 0,
+        pairAddress: p.pairAddress,
+        dexId: p.dexId,
+        url: p.url,
+      };
+    }
+  } catch (err) {
+    log.warn({ error: err.message }, 'DexScreener fetch failed');
+  }
+  return null;
+}
+
+async function handleKols(chatId) {
+  try {
+    await ensureMongo();
+    const KOL = require('./models/KOL');
+    const kols = await KOL.find({ tier: { $in: ['S', 'A'] } })
+      .sort({ 'performance.winRate': -1 })
+      .limit(15)
+      .lean();
+
+    if (!kols.length) return reply(chatId, '📊 No KOL data available yet.');
+
+    const rows = kols.map((k, i) => {
+      const medal = i < 3 ? ['🥇', '🥈', '🥉'][i] : `${i + 1}.`;
+      const wr = ((k.performance?.winRate || 0) * 100).toFixed(0);
+      const trades = k.performance?.totalTrades || 0;
+      const pnl = (k.performance?.totalPnlSol || 0).toFixed(2);
+      const addr = k.wallet.slice(0, 6) + '...' + k.wallet.slice(-4);
+      return `${medal} \`${addr}\` *[${k.tier}]* WR:${wr}% T:${trades} PnL:${pnl}◎`;
+    });
+
+    await reply(chatId, '🏆 *KOL Leaderboard*\n━━━━━━━━━━━━━━━━━━\n\n' + rows.join('\n'));
+  } catch (err) {
+    log.error({ error: err.message }, 'kols failed');
+    await reply(chatId, '⚠️ Could not load KOL leaderboard.');
+  }
+}
+
+async function handleToken(chatId, mint) {
+  if (!mint) return reply(chatId, '📖 Usage: `/token <mint_address>`');
+
+  await reply(chatId, `🔍 Looking up \`${mint.slice(0, 8)}...\``);
+
+  const token = await fetchTokenFromDex(mint);
+  if (!token) return reply(chatId, '❌ Token not found on DexScreener.');
+
+  const change = token.priceChange24h;
+  const changeEmoji = change >= 0 ? '🟢' : '🔴';
+  const liq = token.liquidity > 1000 ? `$${(token.liquidity / 1000).toFixed(1)}K` : `$${token.liquidity}`;
+  const vol = token.volume24h > 1000 ? `$${(token.volume24h / 1000).toFixed(1)}K` : `$${token.volume24h}`;
+  const fdv = token.fdv > 1e6 ? `$${(token.fdv / 1e6).toFixed(2)}M` : `$${(token.fdv / 1000).toFixed(1)}K`;
+
+  await tg('sendMessage', {
+    chat_id: chatId,
+    text:
+      `📊 *${token.name}* (${token.symbol})\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `💵 Price: \`$${token.price}\`\n` +
+      `${changeEmoji} 24h: \`${change >= 0 ? '+' : ''}${change}%\`\n` +
+      `📈 Volume: \`${vol}\`\n` +
+      `💧 Liquidity: \`${liq}\`\n` +
+      `🏷️ FDV: \`${fdv}\`\n` +
+      `🔗 DEX: ${token.dexId}\n\n` +
+      `\`${mint}\``,
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: '🟢 Buy', callback_data: `buy_${mint}` },
+          { text: '🔴 Sell', callback_data: `sell_${mint}` },
+        ],
+        [
+          { text: '🔗 DexScreener', url: token.url || `https://dexscreener.com/solana/${mint}` },
+        ],
+      ],
+    },
+  });
+}
+
+async function handleBuy(chatId, sess, mint, amountArg) {
+  if (!mint) return reply(chatId, '📖 Usage: `/buy <mint> [amount_sol]`');
+
+  // Fetch live token info
+  const token = await fetchTokenFromDex(mint);
+  const name = token ? `${token.name} (${token.symbol})` : `\`${mint.slice(0, 8)}...\``;
+  const priceInfo = token ? `\nPrice: \`$${token.price}\`` : '';
+
+  const amount = amountArg ? parseFloat(amountArg) : (sess.settings?.snipeAmount || 0.1);
+
+  if (sess.settings?.dryRun) {
+    return tg('sendMessage', {
+      chat_id: chatId,
+      text:
+        `🧪 *DRY RUN — Buy ${name}*${priceInfo}\n\n` +
+        `Amount: \`${amount} SOL\`\n` +
+        `Slippage: \`${sess.settings?.slippage || 300} bps\`\n\n` +
+        `_Use \`/dryrun off\` for live trades._`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '📊 Token Details', callback_data: `token_${mint}` }],
+        ],
+      },
+    });
+  }
+  return reply(chatId, `⚡ Buy order for ${name} — Jupiter swap integration coming soon.`);
+}
+
+async function handleSell(chatId, sess, mint, pctArg) {
+  if (!mint) return reply(chatId, '📖 Usage: `/sell <mint> [percent]`');
+  const token = await fetchTokenFromDex(mint);
+  const name = token ? `${token.name} (${token.symbol})` : `\`${mint.slice(0, 8)}...\``;
+  const priceInfo = token ? `\nPrice: \`$${token.price}\`` : '';
+
+  // If percent given, execute directly
+  if (pctArg) {
+    const pct = parseInt(pctArg, 10);
+    if (isNaN(pct) || pct < 1 || pct > 100) return reply(chatId, '❌ Percent must be 1–100.');
+    return handleSellExecute(chatId, sess, mint, pct);
+  }
+
+  // Show percent buttons
+  await tg('sendMessage', {
+    chat_id: chatId,
+    text: `🔴 *Sell ${name}*${priceInfo}\n\nSelect percentage to sell:`,
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: '25%', callback_data: `sell_pct_${mint}_25` },
+          { text: '50%', callback_data: `sell_pct_${mint}_50` },
+          { text: '75%', callback_data: `sell_pct_${mint}_75` },
+          { text: '100%', callback_data: `sell_pct_${mint}_100` },
+        ],
+        [{ text: '📊 Token Details', callback_data: `token_${mint}` }],
+      ],
+    },
+  });
+}
+
+async function handleSellExecute(chatId, sess, mint, pct) {
+  const token = await fetchTokenFromDex(mint);
+  const name = token ? `${token.name} (${token.symbol})` : `\`${mint.slice(0, 8)}...\``;
+
+  if (sess.settings?.dryRun) {
+    return reply(chatId, `🧪 *DRY RUN* — Would sell ${pct}% of ${name}\n\nSlippage: \`${sess.settings?.slippage || 300} bps\`\n\n_Use \`/dryrun off\` for live trades._`);
+  }
+  return reply(chatId, `⚡ Sell ${pct}% of ${name} — Jupiter swap integration coming soon.`);
+}
+
+async function handleSnipe(chatId, sess, mint, amountArg) {
+  if (!mint) return reply(chatId, '📖 *Snipe Usage*\n\n`/snipe <mint> [sol_amount]`\n`/s <mint> [sol_amount]`\n\nUses Jito bundle for priority execution.');
+
+  const token = await fetchTokenFromDex(mint);
+  const name = token ? `${token.name} (${token.symbol})` : `\`${mint.slice(0, 8)}...\``;
+  const priceInfo = token ? `\nPrice: \`$${token.price}\`` : '';
+
+  const amount = amountArg ? parseFloat(amountArg) : (sess.settings?.snipeAmount || 0.1);
+
+  if (sess.settings?.dryRun) {
+    return tg('sendMessage', {
+      chat_id: chatId,
+      text:
+        `🧪 *DRY RUN — Snipe ${name}*${priceInfo}\n\n` +
+        `🎯 Amount: \`${amount} SOL\`\n` +
+        `⚡ Jito Tip: \`${sess.settings?.jitoTip || 1000000} lamports\`\n` +
+        `📊 Slippage: \`${sess.settings?.slippage || 300} bps\`\n\n` +
+        `_Priority execution via Jito bundles._\n` +
+        `_Use \`/dryrun off\` for live trades._`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '📊 Token Details', callback_data: `token_${mint}` }],
+        ],
+      },
+    });
+  }
+  return reply(chatId, `🎯 Snipe order for ${name} — Jito bundle integration coming soon.`);
+}
+
+async function handleCopy(chatId, sess, targetWallet) {
+  await ensureMongo();
+  const User = require('./models/User');
+  const user = await User.findOne({ telegramId: chatId }).lean();
+  const copies = user?.copyTargets || [];
+
+  if (!targetWallet) {
+    // Show current copy targets
+    if (!copies.length) {
+      return reply(chatId,
+        '📋 *Copy Trading*\n━━━━━━━━━━━━━━━━━━\n\n' +
+        'No copy targets set.\n\n' +
+        '`/copy <wallet>` — Start copy trading a KOL or smart wallet.\n\n' +
+        '_Tip: Use /kols to find top-performing wallets._'
+      );
+    }
+
+    const list = copies.map((c, i) =>
+      `${i + 1}. \`${c.kolWallet.slice(0, 8)}...\` (${c.multiplier || 1}x, ${c.enabled ? '🟢 Active' : '⭕ Paused'})`
+    ).join('\n');
+
+    const buttons = copies.flatMap(c => [
+      [
+        { text: `${c.enabled ? '⭕ Pause' : '🟢 Enable'} ${c.kolWallet.slice(0, 6)}...`, callback_data: `copy_toggle_${c.kolWallet}` },
+        { text: `🗑 Remove`, callback_data: `copy_remove_${c.kolWallet}` },
+      ],
+    ]);
+
+    return tg('sendMessage', {
+      chat_id: chatId,
+      text: `📋 *Copy Targets*\n━━━━━━━━━━━━━━━━━━\n\n${list}`,
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: buttons },
+    });
+  }
+
+  // Add new copy target
+  if (targetWallet.length < 32 || targetWallet.length > 44) {
+    return reply(chatId, '❌ Invalid wallet address.');
+  }
+
+  try {
+    await User.findOneAndUpdate(
+      { telegramId: chatId },
+      { $push: { copyTargets: { kolWallet: targetWallet, multiplier: 1, maxSol: 0.5, enabled: true } } }
+    );
+    log.info({ chatId, target: targetWallet }, 'Copy target added');
+    return reply(chatId,
+      `✅ *Copy target added*\n\n` +
+      `Wallet: \`${targetWallet.slice(0, 8)}...\`\n` +
+      `Multiplier: 1x\nMax: 0.5 SOL\n\n` +
+      `_Note: Copy-trading executes when the engine is running._\n` +
+      `Use \`/copy\` to see all targets.`
+    );
+  } catch (err) {
+    log.error({ error: err.message }, 'copy add failed');
+    return reply(chatId, '⚠️ Could not add copy target.');
+  }
+}
+
+async function handleCopyToggle(chatId, wallet) {
+  try {
+    await ensureMongo();
+    const User = require('./models/User');
+    const user = await User.findOne({ telegramId: chatId });
+    const target = user?.copyTargets?.find(c => c.kolWallet === wallet);
+    if (!target) return reply(chatId, '❌ Copy target not found.');
+
+    target.enabled = !target.enabled;
+    await user.save();
+    return reply(chatId, `${target.enabled ? '🟢' : '⭕'} Copy target \`${wallet.slice(0, 8)}...\` ${target.enabled ? 'enabled' : 'paused'}.`);
+  } catch (err) {
+    log.error({ error: err.message }, 'copy toggle failed');
+    return reply(chatId, '⚠️ Could not update copy target.');
+  }
+}
+
+async function handleCopyRemove(chatId, wallet) {
+  try {
+    await ensureMongo();
+    const User = require('./models/User');
+    await User.findOneAndUpdate(
+      { telegramId: chatId },
+      { $pull: { copyTargets: { kolWallet: wallet } } }
+    );
+    return reply(chatId, `🗑 Removed copy target \`${wallet.slice(0, 8)}...\``);
+  } catch (err) {
+    log.error({ error: err.message }, 'copy remove failed');
+    return reply(chatId, '⚠️ Could not remove copy target.');
   }
 }
 
