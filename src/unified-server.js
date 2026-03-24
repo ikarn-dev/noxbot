@@ -92,6 +92,9 @@ async function handleUpdate(update) {
       const text = msg.text.trim();
       const sess = getSession(chatId);
 
+      // Track user messages so /clear can delete them too
+      if (msg.message_id) trackMsg(chatId, msg.message_id);
+
       // Handle scene input (private key import)
       if (sess.scene === 'awaiting_key') {
         return handleKeyImport(chatId, text, msg.message_id, sess);
@@ -103,6 +106,8 @@ async function handleUpdate(update) {
 
       if (cmd === '/start') return handleStart(chatId, sess);
       if (cmd === '/help' || cmd === '/h') return handleHelp(chatId);
+      if (cmd === '/clear') return handleClear(chatId);
+      if (cmd === '/clearall') return handleClearAll(chatId);
 
       // Everything below requires wallet
       if (!sess.wallets?.length) {
@@ -121,7 +126,6 @@ async function handleUpdate(update) {
       if (cmd === '/snipe' || cmd === '/s') return handleSnipe(chatId, sess, parts[1], parts[2]);
       if (cmd === '/copy') return handleCopy(chatId, sess, parts[1]);
       if (cmd === '/refresh') return handleStart(chatId, sess);
-      if (cmd === '/clear') return handleClear(chatId);
 
       if (cmd.startsWith('/')) {
         return reply(chatId, `Unknown command. Use /help.`);
@@ -145,6 +149,7 @@ async function handleUpdate(update) {
       if (data === 'cmd_settings') return handleSettings(chatId, sess, ['settings']);
       if (data === 'cmd_kols') return handleKols(chatId);
       if (data === 'cmd_copy') return handleCopy(chatId, sess);
+      if (data === 'cmd_clearall') return handleClearAll(chatId);
 
       // Token card buttons
       if (data.startsWith('buy_')) return handleBuy(chatId, sess, data.slice(4));
@@ -269,19 +274,67 @@ async function handleClear(chatId) {
   if (!ids.length) return reply(chatId, '🧹 Nothing to clear.');
 
   let deleted = 0;
-  // Delete in batches (Telegram allows deleting up to 100 messages)
-  for (const msgId of ids) {
+  // Try bulk delete first (works for messages < 48 hours old)
+  const chunks = [];
+  for (let i = 0; i < ids.length; i += 100) {
+    chunks.push(ids.slice(i, i + 100));
+  }
+  for (const chunk of chunks) {
     try {
-      await tg('deleteMessage', { chat_id: chatId, message_id: msgId });
-      deleted++;
-    } catch { /* message already deleted or too old */ }
+      const result = await tg('deleteMessages', { chat_id: chatId, message_ids: chunk });
+      if (result) { deleted += chunk.length; continue; }
+    } catch { /* bulk delete not supported, fall through to individual */ }
+    // Fallback: delete individually
+    for (const msgId of chunk) {
+      try {
+        const result = await tg('deleteMessage', { chat_id: chatId, message_id: msgId });
+        if (result) deleted++;
+      } catch { /* message already deleted or too old */ }
+    }
   }
   sentMsgs.set(chatId, []);
 
   // Send confirmation (auto-deletes after 3s)
   const confirm = await tg('sendMessage', {
     chat_id: chatId,
-    text: `🧹 Cleared ${deleted} messages.`,
+    text: `🧹 Cleared ${deleted} message${deleted !== 1 ? 's' : ''}.`,
+  });
+  if (confirm?.message_id) {
+    setTimeout(() => tg('deleteMessage', { chat_id: chatId, message_id: confirm.message_id }).catch(() => {}), 3000);
+  }
+}
+
+async function handleClearAll(chatId) {
+  const ids = sentMsgs.get(chatId) || [];
+  
+  let deleted = 0;
+  if (ids.length) {
+    // Try bulk delete first
+    const chunks = [];
+    for (let i = 0; i < ids.length; i += 100) {
+      chunks.push(ids.slice(i, i + 100));
+    }
+    for (const chunk of chunks) {
+      try {
+        const result = await tg('deleteMessages', { chat_id: chatId, message_ids: chunk });
+        if (result) { deleted += chunk.length; continue; }
+      } catch { /* fall through */ }
+      for (const msgId of chunk) {
+        try {
+          const result = await tg('deleteMessage', { chat_id: chatId, message_id: msgId });
+          if (result) deleted++;
+        } catch { /* skip */ }
+      }
+    }
+  }
+  sentMsgs.set(chatId, []);
+
+  // Send confirmation (auto-deletes after 3s)
+  const confirm = await tg('sendMessage', {
+    chat_id: chatId,
+    text: deleted > 0
+      ? `🧹 Cleared all ${deleted} message${deleted !== 1 ? 's' : ''} from chat.`
+      : '🧹 Chat is already clean.',
   });
   if (confirm?.message_id) {
     setTimeout(() => tg('deleteMessage', { chat_id: chatId, message_id: confirm.message_id }).catch(() => {}), 3000);
@@ -318,6 +371,10 @@ async function handleHelp(chatId) {
       '  /set `<key> <value>` — Change setting\n' +
       '  /dryrun — Toggle dry run\n\n' +
 
+      '🧹 *Utility*\n' +
+      '  /clear — Delete recent bot messages\n' +
+      '  /clearall — Clear entire chat\n\n' +
+
       '━━━━━━━━━━━━━━━━━━\n' +
       '🧪 Dry Run is *ON* by default — no real SOL spent.',
     parse_mode: 'Markdown',
@@ -334,6 +391,9 @@ async function handleHelp(chatId) {
         [
           { text: '🔑 Wallets', callback_data: 'cmd_wallets' },
           { text: '⚙️ Settings', callback_data: 'cmd_settings' },
+        ],
+        [
+          { text: '🧹 Clear Chat', callback_data: 'cmd_clearall' },
         ],
       ],
     },
