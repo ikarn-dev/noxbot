@@ -34,7 +34,21 @@ async function tg(method, body = {}) {
 }
 
 async function reply(chatId, text, opts = {}) {
-  return tg('sendMessage', { chat_id: chatId, text, parse_mode: 'Markdown', ...opts });
+  const result = await tg('sendMessage', { chat_id: chatId, text, parse_mode: 'Markdown', ...opts });
+  if (result?.message_id) trackMsg(chatId, result.message_id);
+  return result;
+}
+
+// ─── Message Tracker (for /clear) ──────────────────
+
+const sentMsgs = new Map(); // chatId → [messageId, ...]
+const MAX_TRACKED = 100;
+
+function trackMsg(chatId, msgId) {
+  if (!sentMsgs.has(chatId)) sentMsgs.set(chatId, []);
+  const arr = sentMsgs.get(chatId);
+  arr.push(msgId);
+  if (arr.length > MAX_TRACKED) arr.shift();
 }
 
 // ─── Express App ───────────────────────────────────
@@ -107,6 +121,7 @@ async function handleUpdate(update) {
       if (cmd === '/snipe' || cmd === '/s') return handleSnipe(chatId, sess, parts[1], parts[2]);
       if (cmd === '/copy') return handleCopy(chatId, sess, parts[1]);
       if (cmd === '/refresh') return handleStart(chatId, sess);
+      if (cmd === '/clear') return handleClear(chatId);
 
       if (cmd.startsWith('/')) {
         return reply(chatId, `Unknown command. Use /help.`);
@@ -246,6 +261,30 @@ async function handleKeyImport(chatId, keyInput, msgId, sess) {
     );
   } catch {
     await reply(chatId, '❌ Invalid private key. Send a valid Base58 key or use /start to try again.');
+  }
+}
+
+async function handleClear(chatId) {
+  const ids = sentMsgs.get(chatId) || [];
+  if (!ids.length) return reply(chatId, '🧹 Nothing to clear.');
+
+  let deleted = 0;
+  // Delete in batches (Telegram allows deleting up to 100 messages)
+  for (const msgId of ids) {
+    try {
+      await tg('deleteMessage', { chat_id: chatId, message_id: msgId });
+      deleted++;
+    } catch { /* message already deleted or too old */ }
+  }
+  sentMsgs.set(chatId, []);
+
+  // Send confirmation (auto-deletes after 3s)
+  const confirm = await tg('sendMessage', {
+    chat_id: chatId,
+    text: `🧹 Cleared ${deleted} messages.`,
+  });
+  if (confirm?.message_id) {
+    setTimeout(() => tg('deleteMessage', { chat_id: chatId, message_id: confirm.message_id }).catch(() => {}), 3000);
   }
 }
 
@@ -758,6 +797,15 @@ async function start() {
     const url = `${WEBHOOK_DOMAIN}/bot${BOT_TOKEN}`;
     await tg('setWebhook', { url, drop_pending_updates: true });
     log.info({ url }, '✅ Webhook set — ready');
+
+    // Self-ping keep-alive: prevents Render free tier from sleeping
+    const keepAliveUrl = `${WEBHOOK_DOMAIN}/api/health`;
+    setInterval(async () => {
+      try {
+        await fetch(keepAliveUrl);
+      } catch { /* ignore */ }
+    }, 60 * 1000); // every 1 minute
+    log.info('🔄 Keep-alive started (1min interval)');
   } else {
     // Local dev: simple fetch-based polling
     log.info('Starting fetch-based polling...');
