@@ -129,7 +129,6 @@ const UserSchema = new Schema({
 
 // ─── Indexes ─────────────────────────────────
 UserSchema.index({ 'wallets.publicKey': 1 });
-UserSchema.index({ 'copyTargets.kolWallet': 1 });
 UserSchema.index({ tier: 1, createdAt: -1 });
 
 module.exports = mongoose.model('User', UserSchema);

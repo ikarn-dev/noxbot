@@ -7,7 +7,7 @@
     "node": "22.x"
   },
   "scripts": {
-    "start": "node src/unified-server.js",
+    "start": "node --max-old-space-size=256 src/unified-server.js",
     "start:engine": "node src/snipe-engine.js",
     "start:bot": "node src/bot/index.js",
     "start:api": "node src/api/server.js",
