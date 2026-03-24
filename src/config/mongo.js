@@ -19,8 +19,12 @@ const MONGO_OPTIONS = {
   // Timeouts
   serverSelectionTimeoutMS: 5000,
   socketTimeoutMS: 45000,
-  // Misc
-  autoIndex: process.env.NODE_ENV !== 'production',
+  // CRITICAL: autoIndex MUST be false.
+  // With autoIndex:true, mongoose fires createIndex for all 26 indexes
+  // simultaneously over TLS to Atlas on every startup. Node v24's TLS
+  // implementation leaks memory on concurrent TLS ops, causing OOM.
+  // Run `db.collection.createIndex()` manually or via migration script.
+  autoIndex: false,
 };
 
 async function connectMongo() {

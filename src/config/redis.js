@@ -31,7 +31,7 @@ function buildOptions() {
         logger.warn({ attempt: times, delayMs: delay }, 'Redis reconnecting');
         return delay;
       },
-      lazyConnect: false,
+      lazyConnect: true,  // Don't open TLS socket until first command
     };
   }
 
@@ -46,7 +46,7 @@ function buildOptions() {
       logger.warn({ attempt: times, delayMs: delay }, 'Redis reconnecting');
       return delay;
     },
-    lazyConnect: false,
+    lazyConnect: true,
   };
 }
 

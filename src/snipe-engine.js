@@ -21,6 +21,7 @@ const { cacheThreatData } = require('./threat/pre-cacher');
 const TemplatePool = require('./execution/template-pool');
 const Signal = require('./models/Signal');
 const KOL = require('./models/KOL');
+const PQueue = require('p-queue').default || require('p-queue');
 
 // Phase 4 scanners
 const { startKolScanner }        = require('./kol/scanner');
@@ -42,15 +43,19 @@ class SnipeEngine {
     this._processedMints = new Set(); // dedup within session
     this._scannerIntervals = [];      // Phase 4 scanner interval IDs
     this._stats = { tokensScanned: 0, signalsBroadcast: 0, autoSnipes: 0, blocked: 0, errors: 0 };
+
+    // Concurrency limiter: max 3 tokens processed simultaneously
+    // Prevents OOM from DexScreener burst (30+ tokens → 60+ parallel API calls)
+    this._queue = new PQueue({ concurrency: 3 });
   }
 
   async start() {
     logger.info({ msg: 'Snipe engine starting' });
 
-    await connectMongo();
+    // MongoDB connection is handled by unified-server.js — no need to connect here
 
-    // Listen for events from both data sources
-    const handleTx = (tx) => this._handleTransaction(tx);
+    // Listen for events from both data sources — queue them to limit concurrency
+    const handleTx = (tx) => this._queue.add(() => this._handleTransaction(tx));
     this.helius.on('transaction', handleTx);
     this.dexPoller.on('transaction', handleTx);
 
@@ -76,15 +81,35 @@ class SnipeEngine {
 
     logger.info({ msg: 'Snipe engine started' });
 
-    // Phase 4: Start background scanners
+    // Phase 4: Start background scanners (staggered to avoid startup burst)
     try {
       const kolId = await startKolScanner();
-      const hpId  = await startHoneypotWatcher();
-      const dwId  = await startDevWalletWatcher();
-      const lpId  = await startLpLockChecker();
-      const pmId  = await startPositionMonitor();
-      this._scannerIntervals.push(kolId, hpId, dwId, lpId, pmId);
-      logger.info({ msg: 'Phase 4 scanners started', count: 5 });
+      this._scannerIntervals.push(kolId);
+
+      // Stagger the rest — don't launch all scanners simultaneously
+      setTimeout(async () => {
+        try {
+          const hpId = await startHoneypotWatcher();
+          this._scannerIntervals.push(hpId);
+        } catch (e) { logger.warn({ msg: 'Honeypot watcher start failed', error: e.message }); }
+      }, 5_000);
+
+      setTimeout(async () => {
+        try {
+          const dwId = await startDevWalletWatcher();
+          const lpId = await startLpLockChecker();
+          this._scannerIntervals.push(dwId, lpId);
+        } catch (e) { logger.warn({ msg: 'Dev/LP watcher start failed', error: e.message }); }
+      }, 10_000);
+
+      setTimeout(async () => {
+        try {
+          const pmId = await startPositionMonitor();
+          this._scannerIntervals.push(pmId);
+        } catch (e) { logger.warn({ msg: 'Position monitor start failed', error: e.message }); }
+      }, 15_000);
+
+      logger.info({ msg: 'Phase 4 scanners starting (staggered)' });
     } catch (err) {
       logger.error({ msg: 'Phase 4 scanner startup failed (non-fatal)', error: err.message });
     }
@@ -109,15 +134,26 @@ class SnipeEngine {
       // Fetch live KOL matches for this mint
       const kolMatches = await this._findKolMatches(mint);
 
+      // Extract DexScreener data from raw profile (when available)
+      const raw = tx.raw || {};
+      const volumeSpikePct = raw.volume?.h24 && raw.volume?.h6
+        ? ((raw.volume.h6 / Math.max(raw.volume.h24 - raw.volume.h6, 1)) - 1) * 100
+        : 0;
+      const liquidityUsd = raw.liquidity?.usd || raw.liquidityUsd || 0;
+      const pairCreatedAt = raw.pairCreatedAt || raw.createdAt;
+      const tokenAgeMinutes = pairCreatedAt
+        ? Math.max(0, (Date.now() - new Date(pairCreatedAt).getTime()) / 60_000)
+        : 0;
+
       const scoringInput = {
-        volumeSpikePct: 0,      // TODO: DexScreener volume delta
-        liquidityUsd: 0,        // TODO: DexScreener liquidity
+        volumeSpikePct,
+        liquidityUsd,
         kolMatches,
-        socialMentions: 0,      // TODO: X API mention count
+        socialMentions: 0,      // Future: X API mention count
         isHoneypot: threatData.isHoneypot,
         rugCheckScore: threatData.score,
         devHoldingsPct: threatData.devHoldingsPct,
-        tokenAgeMinutes: 0,     // TODO: compute from first TX
+        tokenAgeMinutes,
         mintAuthorityRevoked: threatData.mintAuthorityRevoked,
         freezeAuthorityRevoked: threatData.freezeAuthorityRevoked,
         lpLockedPct: threatData.lpLockedPct,

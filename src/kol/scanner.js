@@ -192,7 +192,7 @@ async function detectClusters(buys) {
         timestamp: Date.now(),
       };
 
-      await redisPub.publish(ALERT_CHANNEL, JSON.stringify(event));
+      eventBus.publish(ALERT_CHANNEL, event);
       logger.info({ mint: mint.slice(0, 8), kolCount: uniqueList.length, topTier }, 'cluster buy detected');
     }
   }

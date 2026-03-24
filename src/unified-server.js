@@ -1,109 +1,184 @@
 'use strict';
 
 /**
- * Unified Server — Single-process entry point for Nox bot
+ * Unified Server — Zero-import boot for Node v24 compatibility
  *
- * Replaces the 5 PM2 processes with one process:
- *   1. Telegram Bot (Telegraf — webhook or long-polling)
- *   2. API + Dashboard SSE (Express)
- *   3. Snipe Engine (in-process, event-driven)
- *   4. Helius Webhook receiver (Express route)
- *   5. DexScreener Poller (setInterval)
- *   6. Phase-4 background scanners (setInterval)
+ * CRITICAL: Do NOT add any require() calls above boot() that pull in
+ * heavy dependencies (@solana/web3.js, mongoose models, etc.).
+ * Only 'telegraf', 'dotenv', and 'pino' are safe top-level imports.
  *
- * Total memory target: < 200MB (fits Fly.io free tier 256MB)
+ * Boot phases:
+ *   Phase 1 (t=0):   Bare Telegraf + onboarding scene → bot.launch()
+ *   Phase 2 (t=2s):  MongoDB + lightweight commands
+ *   Phase 3 (t=5s):  Heavy commands (@solana/web3.js)
+ *   Phase 4 (t=8s):  Snipe engine + API
  */
 
 require('dotenv').config();
 
-const http = require('http');
-const logger = require('./config/logger').child({ module: 'unified' });
-const { connectMongo, disconnectMongo } = require('./config/mongo');
-const { disconnectRedis } = require('./config/redis');
-
-// Sub-systems
-const { bot, launch: launchBot } = require('./bot/index');
-const { app: apiApp } = require('./api/server');
-const SnipeEngine = require('./snipe-engine');
+const { Telegraf, Scenes, session } = require('telegraf');
+const log = require('./config/logger').child({ module: 'unified' });
 
 const PORT = parseInt(process.env.PORT || process.env.API_PORT || '3099', 10);
 
-// ─── Boot ──────────────────────────────────────────
+function mem(label) {
+  const m = process.memoryUsage();
+  log.info({ heapMB: Math.round(m.heapUsed / 1024 / 1024), rssMB: Math.round(m.rss / 1024 / 1024) }, label);
+}
+
+// ─── Phase 1: Bare bot ───────────────────────────
 
 async function boot() {
-  logger.info({ msg: '🚀 Nox unified server starting' });
+  log.info('🚀 Nox starting');
 
-  // 1. Connect shared services
-  await connectMongo();
-  logger.info({ msg: 'MongoDB connected' });
+  const bot = new Telegraf(process.env.BOT_TOKEN);
 
-  // 2. Start the snipe engine (Helius + DexScreener event sources)
-  const engine = new SnipeEngine();
-  await engine.start();
+  // Onboarding scene — safe because it lazy-imports @solana/web3.js internally
+  const onboardingScene = require('./bot/scenes/onboarding');
+  const stage = new Scenes.Stage([onboardingScene]);
 
-  // 3. Mount Helius webhook on the API Express app
-  apiApp.post('/api/helius-webhook', engine.helius.routeHandler);
-  logger.info({ msg: 'Helius webhook mounted on /api/helius-webhook' });
+  bot.use(session());
+  bot.use(stage.middleware());
 
-  // 4. Start the Telegram bot
-  if (process.env.WEBHOOK_DOMAIN) {
-    // Webhook mode: bot registers its own webhook path on Telegram's servers.
-    // We set up an Express route that Telegraf's webhookCallback returns.
-    const webhookPath = `/webhook/${process.env.BOT_TOKEN}`;
-    apiApp.use(bot.webhookCallback(webhookPath));
-
-    // Tell Telegram about our webhook
-    await bot.telegram.setWebhook(
-      `${process.env.WEBHOOK_DOMAIN}${webhookPath}`,
-      { secret_token: process.env.WEBHOOK_SECRET }
+  bot.start(async (ctx) => {
+    if (!ctx.session?.wallets || ctx.session.wallets.length === 0) {
+      return ctx.scene.enter('onboarding');
+    }
+    return ctx.reply(
+      `Welcome back to *Nox* ⚡\n\nActive wallet: \`${ctx.session.activeWallet?.slice(0, 8)}...\`\nUse /help for commands.`,
+      { parse_mode: 'Markdown' }
     );
-    logger.info({ msg: 'Bot launched (webhook)', domain: process.env.WEBHOOK_DOMAIN });
-  } else {
-    // Long-polling mode (dev / no public URL)
-    await bot.launch();
-    logger.info({ msg: 'Bot launched (long polling)' });
+  });
+
+  bot.catch((err, ctx) => {
+    log.error({ err: err.message, userId: ctx.from?.id }, 'bot error');
+    ctx.reply('⚠️ An error occurred. Please try again.').catch(() => {});
+  });
+
+  // Minimal health check server
+  const http = require('http');
+  let ready = false;
+  const server = http.createServer((req, res) => {
+    if (req.url === '/api/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: ready ? 'ready' : 'booting', uptime: process.uptime() }));
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+  server.listen(PORT, () => log.info(`Health check on :${PORT}`));
+
+  // CRITICAL: Flush Telegram's polling queue BEFORE launching.
+  // dropPendingUpdates only clears webhook queues, not polling.
+  // After multiple restarts, hundreds of stale updates accumulate.
+  log.info('Flushing Telegram update queue...');
+  try {
+    const updates = await bot.telegram.callApi('getUpdates', { offset: -1, limit: 1 });
+    if (updates && updates.length > 0) {
+      // Skip past the last update
+      await bot.telegram.callApi('getUpdates', { offset: updates[0].update_id + 1, limit: 0 });
+      log.info({ cleared: updates[0].update_id }, 'Update queue flushed');
+    } else {
+      log.info('No pending updates');
+    }
+  } catch (err) {
+    log.warn({ error: err.message }, 'Queue flush failed (non-fatal)');
   }
 
-  // 5. Start HTTP server (Express handles API + webhook routes)
-  const server = http.createServer(apiApp);
-  server.listen(PORT, () => {
-    logger.info({ msg: `HTTP server listening on :${PORT}` });
-  });
+  mem('Phase 1: launching bot');
+  await bot.launch({ dropPendingUpdates: true });
+  log.info('✅ Bot live (long polling)');
+  mem('Phase 1 complete');
 
-  // ─── Graceful Shutdown ─────────────────────────
-  const shutdown = async (signal) => {
-    logger.info({ msg: `Received ${signal}, shutting down…` });
+  // ─── Phase 2: MongoDB + light commands (t=2s) ──
+  setTimeout(async () => {
+    try {
+      log.info('Phase 2: connecting services...');
+      const { connectMongo } = require('./config/mongo');
+      await connectMongo();
+      log.info('MongoDB connected');
 
-    // Stop accepting new requests
-    server.close();
+      // Additional scenes
+      stage.register(require('./bot/scenes/copySetup'));
+      stage.register(require('./bot/scenes/customAmount'));
+      stage.register(require('./bot/scenes/customSellPercent'));
 
-    // Stop sub-systems
+      // Lightweight commands (no @solana/web3.js)
+      require('./bot/commands/help').register(bot);
+      require('./bot/commands/settings').register(bot);
+      require('./bot/commands/wallets').register(bot);
+      require('./bot/commands/positions').register(bot);
+      require('./bot/commands/pnl').register(bot);
+      require('./bot/commands/kols').register(bot);
+      mem('Phase 2 complete');
+    } catch (err) {
+      log.error({ error: err.message }, 'Phase 2 failed');
+    }
+
+    // ─── Phase 3: Heavy commands (t=5s) ──────────
+    setTimeout(() => {
+      try {
+        log.info('Phase 3: loading trade commands...');
+        require('./bot/commands/buy').register(bot);
+        require('./bot/commands/sell').register(bot);
+        require('./bot/commands/snipe').register(bot);
+        require('./bot/commands/copy').register(bot);
+        require('./bot/commands/dryrun').register(bot);
+
+        require('./bot/callbacks/snipeCallback').register(bot);
+        require('./bot/callbacks/exitCallback').register(bot);
+        require('./bot/callbacks/copyCallback').register(bot);
+        require('./bot/callbacks/refreshCallback').register(bot);
+        mem('Phase 3 complete');
+      } catch (err) {
+        log.error({ error: err.message }, 'Phase 3 failed');
+      }
+
+      // ─── Phase 4: Engine + API (t=8s) ───────────
+      setTimeout(async () => {
+        try {
+          log.info('Phase 4: starting engine...');
+          const { startSignalSubscriber } = require('./bot/notifications/signalPush');
+          startSignalSubscriber(bot);
+
+          const SnipeEngine = require('./snipe-engine');
+          const engine = new SnipeEngine();
+          await engine.start();
+
+          // Upgrade health server to full API
+          const { app: apiApp, setReady } = require('./api/server');
+          apiApp.post('/api/helius-webhook', engine.helius.routeHandler);
+          server.removeAllListeners('request');
+          server.on('request', apiApp);
+
+          setReady(true);
+          ready = true;
+          mem('Phase 4 complete — fully ready');
+          log.info({ port: PORT, pid: process.pid }, '✅ Nox fully ready');
+        } catch (err) {
+          log.error({ error: err.message }, 'Phase 4 failed (bot still works)');
+          ready = true;
+        }
+      }, 3000);
+    }, 3000);
+  }, 2000);
+
+  // Graceful shutdown
+  const shutdown = (signal) => {
+    log.info(`${signal} — shutting down`);
     bot.stop(signal);
-    await engine.stop();
-    await disconnectRedis();
-    await disconnectMongo();
-
-    logger.info({ msg: 'Shutdown complete' });
+    server.close();
     process.exit(0);
   };
-
   process.once('SIGINT', () => shutdown('SIGINT'));
   process.once('SIGTERM', () => shutdown('SIGTERM'));
-
   process.on('unhandledRejection', (err) => {
-    logger.error({ msg: 'Unhandled rejection', error: err?.message, stack: err?.stack });
-  });
-
-  logger.info({
-    msg: '✅ Nox unified server ready',
-    port: PORT,
-    mode: process.env.WEBHOOK_DOMAIN ? 'webhook' : 'polling',
-    pid: process.pid,
-    memMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
+    log.error({ error: err?.message }, 'unhandled rejection');
   });
 }
 
 boot().catch((err) => {
-  logger.fatal({ msg: 'Failed to start unified server', error: err.message, stack: err.stack });
+  log.fatal({ error: err.message, stack: err.stack }, 'Boot failed');
   process.exit(1);
 });

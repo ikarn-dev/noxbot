@@ -1,19 +1,13 @@
 /**
  * scenes/onboarding.js — First-run wallet setup wizard
- * 
- * Steps:
- *   1. Welcome message + create/import choice
- *   2. Generate new keypair OR accept private key import
- *   3. Confirm wallet + set initial settings
+ *
+ * ALL heavy imports (@solana/web3.js, bs58, User model) are lazy-loaded
+ * inside handlers to avoid bloating the heap before bot.launch().
  */
 'use strict';
 
 const { Scenes, Markup } = require('telegraf');
-const { Keypair }        = require('@solana/web3.js');
-const _bs58              = require('bs58');
-const bs58               = _bs58.default || _bs58; // bs58 v5 is ESM, require() wraps it
-const log                = require('../../config/logger').child({ module: 'scene:onboarding' });
-const User               = require('../../models/User');
+const log = require('../../config/logger').child({ module: 'scene:onboarding' });
 
 const scene = new Scenes.WizardScene(
   'onboarding',
@@ -35,23 +29,36 @@ const scene = new Scenes.WizardScene(
     return ctx.wizard.next();
   },
 
-  // Step 2: Handle wallet creation/import
+  // Step 2: Handle wallet creation/import (text input for private key)
   async (ctx) => {
-    // This step handles text input (for private key import)
     if (ctx.message?.text) {
       const keyInput = ctx.message.text.trim();
+
+      // Ignore commands
+      if (keyInput.startsWith('/')) {
+        await ctx.scene.reenter();
+        return;
+      }
 
       // Delete the message with the private key immediately
       await ctx.deleteMessage(ctx.message.message_id).catch(() => {});
 
       try {
+        // Lazy-load heavy deps only when actually needed
+        const { Keypair } = require('@solana/web3.js');
+        const _bs58 = require('bs58');
+        const bs58 = _bs58.default || _bs58;
+        const { encryptPrivateKey } = require('../../utils/wallet-crypto');
+
         const secretKey = bs58.decode(keyInput);
         const keypair = Keypair.fromSecretKey(secretKey);
         const publicKey = keypair.publicKey.toBase58();
 
+        const encrypted = encryptPrivateKey(keyInput);
+
         ctx.wizard.state.wallet = {
           publicKey,
-          encryptedKey: keyInput, // TODO: encrypt with user's PIN
+          ...encrypted,
           label: 'Imported',
         };
 
@@ -64,28 +71,43 @@ const scene = new Scenes.WizardScene(
         return finishOnboarding(ctx);
       } catch {
         await ctx.reply('❌ Invalid private key. Please send a valid Base58 key or tap Generate.');
-        return; // Stay on this step
+        return;
       }
     }
   },
 );
 
+// Handle /start while inside the scene — re-enter to reset wizard
+scene.command('start', async (ctx) => {
+  return ctx.scene.reenter();
+});
+
 // Handle "Generate" button
 scene.action('onboard_generate', async (ctx) => {
+  if (ctx.wizard.state.generating) return ctx.answerCbQuery('Already generating...');
+  ctx.wizard.state.generating = true;
   await ctx.answerCbQuery();
 
   try {
-    const keypair   = Keypair.generate();
+    // Lazy-load heavy deps
+    const { Keypair } = require('@solana/web3.js');
+    const _bs58 = require('bs58');
+    const bs58 = _bs58.default || _bs58;
+    const { encryptPrivateKey } = require('../../utils/wallet-crypto');
+
+    const keypair = Keypair.generate();
     const publicKey = keypair.publicKey.toBase58();
     const secretKey = bs58.encode(keypair.secretKey);
 
+    const encrypted = encryptPrivateKey(secretKey);
+
     ctx.wizard.state.wallet = {
       publicKey,
-      encryptedKey: secretKey, // TODO: encrypt at rest
+      ...encrypted,
       label: 'Main',
     };
 
-    await ctx.reply(
+    const sentMsg = await ctx.reply(
       `✅ *Wallet Generated*\n\n` +
       `Address: \`${publicKey}\`\n\n` +
       `🔐 *SAVE YOUR PRIVATE KEY:*\n` +
@@ -95,9 +117,9 @@ scene.action('onboard_generate', async (ctx) => {
       { parse_mode: 'Markdown' }
     );
 
-    // Auto-delete after 60s
+    // Auto-delete after 60s (capture message ID)
     setTimeout(async () => {
-      try { await ctx.deleteMessage(); } catch {}
+      try { await ctx.telegram.deleteMessage(ctx.chat.id, sentMsg.message_id); } catch {}
     }, 60_000);
 
     return finishOnboarding(ctx);
@@ -136,25 +158,34 @@ async function finishOnboarding(ctx) {
     autoSell:    false,
     takeProfit:  100,
     stopLoss:    50,
-    dryRun:      true, // Start in dry run for safety
+    dryRun:      true,
   };
 
-  // Upsert user in MongoDB
+  // Upsert user in MongoDB (lazy-load model)
   try {
+    const User = require('../../models/User');
     await User.findOneAndUpdate(
       { telegramId: ctx.from.id },
       {
         telegramId: ctx.from.id,
         username:   ctx.from.username,
-        $push:      { wallets: { publicKey: wallet.publicKey, label: wallet.label } },
-        activeWallet: wallet.publicKey,
-        settings:   ctx.session.settings,
+        $push: {
+          wallets: {
+            publicKey:          wallet.publicKey,
+            encryptedPrivateKey: wallet.encryptedPrivateKey,
+            iv:                 wallet.iv,
+            authTag:            wallet.authTag,
+            label:              wallet.label,
+            isDefault:          true,
+          },
+        },
+        settings: ctx.session.settings,
       },
       { upsert: true, new: true }
     );
     log.info({ userId: ctx.from.id, wallet: wallet.publicKey }, 'user onboarded');
   } catch (err) {
-    log.error({ err: err.message }, 'user save failed');
+    log.error({ err: err.message }, 'user save failed (MongoDB may not be connected yet)');
   }
 
   await ctx.reply(

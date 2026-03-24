@@ -120,7 +120,7 @@ async function checkLpLocks() {
           reason: 'Mint authority re-enabled — token supply can be inflated',
           timestamp: Date.now(),
         };
-        await redisPub.publish(ALERT_CHANNEL, JSON.stringify(event));
+        eventBus.publish(ALERT_CHANNEL, event);
         logger.warn({ mint: mint.slice(0, 8) }, 'mint authority re-enabled');
       }
     }

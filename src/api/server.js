@@ -58,10 +58,14 @@ function authGuard(req, res, next) {
 
 app.use(authGuard);
 
+// ─── Readiness flag (set by unified-server after all services connect) ───
+let _isReady = false;
+function setReady(ready) { _isReady = ready; }
+
 // ─── GET /api/health ─────────────────────────────
 
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', uptime: process.uptime(), timestamp: Date.now() });
+  res.json({ status: _isReady ? 'ok' : 'starting', uptime: process.uptime(), timestamp: Date.now() });
 });
 
 // ─── GET /api/signals ────────────────────────────
@@ -112,8 +116,13 @@ app.get('/api/signals/live', (req, res) => {
   res.write('event: connected\ndata: {"status":"connected"}\n\n');
 
   // In-process event bus handler (replaces Redis pub/sub)
-  const onSignal = (payload) => {
-    res.write(`event: signal\ndata: ${JSON.stringify(payload)}\n\n`);
+  const onSignal = (_channel, message) => {
+    try {
+      const payload = typeof message === 'string' ? JSON.parse(message) : message;
+      res.write(`event: signal\ndata: ${JSON.stringify(payload)}\n\n`);
+    } catch (err) {
+      log.warn({ err: err.message }, 'SSE signal parse error');
+    }
   };
 
   eventBus.subscribe('signals:broadcast', onSignal);
@@ -226,4 +235,4 @@ app.use((err, _req, res, _next) => {
 });
 
 // Export Express app (mounted by unified-server.js)
-module.exports = { app, authGuard };
+module.exports = { app, authGuard, setReady };

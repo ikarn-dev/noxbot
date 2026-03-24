@@ -4,7 +4,7 @@
   "description": "Solana memecoin sniper Telegram bot — sub-50ms execution via Jito bundles, KOL intelligence, threat-gated trading",
   "main": "src/unified-server.js",
   "engines": {
-    "node": ">=20.0.0"
+    "node": "22.x"
   },
   "scripts": {
     "start": "node src/unified-server.js",
