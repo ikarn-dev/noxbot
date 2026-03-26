@@ -110,6 +110,8 @@ async function handleUpdate(update) {
       if (cmd === '/help' || cmd === '/h') return handleHelp(chatId);
       if (cmd === '/clear') return handleClear(chatId);
       if (cmd === '/clearall') return handleClearAll(chatId);
+      if (cmd === '/newwallet') return handleGenerate(chatId, sess);
+      if (cmd === '/importwallet') return handleImport(chatId, sess);
 
       // Everything below requires wallet
       if (!sess.wallets?.length) {
@@ -119,14 +121,14 @@ async function handleUpdate(update) {
       if (cmd === '/wallets') return handleWallets(chatId, sess);
       if (cmd === '/settings' || cmd === '/set') return handleSettings(chatId, sess, parts);
       if (cmd === '/dryrun') return handleDryrun(chatId, sess, parts[1]);
-      if (cmd === '/pnl') return handlePnl(chatId, parts[1]);
-      if (cmd === '/positions' || cmd === '/pos') return handlePositions(chatId);
+      if (cmd === '/pnl') return handlePnl(chatId, msg.from.id, parts[1]);
+      if (cmd === '/positions' || cmd === '/pos') return handlePositions(chatId, msg.from.id);
       if (cmd === '/kols') return handleKols(chatId);
       if (cmd === '/token') return handleToken(chatId, parts[1]);
       if (cmd === '/buy' || cmd === '/b') return handleBuy(chatId, sess, parts[1], parts[2]);
       if (cmd === '/sell') return handleSell(chatId, sess, parts[1], parts[2]);
       if (cmd === '/snipe' || cmd === '/s') return handleSnipe(chatId, sess, parts[1], parts[2]);
-      if (cmd === '/copy') return handleCopy(chatId, sess, parts[1]);
+      if (cmd === '/copy') return handleCopy(chatId, sess, parts.slice(1));
       if (cmd === '/refresh') return handleStart(chatId, sess);
 
       if (cmd.startsWith('/')) {
@@ -144,14 +146,20 @@ async function handleUpdate(update) {
       if (data === 'onboard_generate') return handleGenerate(chatId, sess);
       if (data === 'onboard_import') return handleImport(chatId, sess);
 
+      const userId = cb.from.id;
+
       // Help menu buttons
-      if (data === 'cmd_positions') return handlePositions(chatId);
-      if (data === 'cmd_pnl') return handlePnl(chatId, '7d');
+      if (data === 'cmd_positions') return handlePositions(chatId, userId);
+      if (data === 'cmd_pnl') return handlePnl(chatId, userId, '7d');
       if (data === 'cmd_wallets') return handleWallets(chatId, sess);
       if (data === 'cmd_settings') return handleSettings(chatId, sess, ['settings']);
       if (data === 'cmd_kols') return handleKols(chatId);
-      if (data === 'cmd_copy') return handleCopy(chatId, sess, null);
+      if (data === 'cmd_copy') {
+        if (!sess.wallets?.length) return reply(chatId, '🔑 Set up a wallet first. Use /start.');
+        return handleCopy(chatId, sess, null);
+      }
       if (data === 'cmd_clearall') return handleClearAll(chatId);
+      if (data === 'cmd_help') return handleHelp(chatId);
 
       // Token card buttons — IMPORTANT: sell_pct_ must be checked BEFORE sell_ prefix
       if (data.startsWith('buy_')) return handleBuy(chatId, sess, data.slice(4));
@@ -182,28 +190,32 @@ async function handleUpdate(update) {
 // ─── Handlers ──────────────────────────────────────
 
 async function handleStart(chatId, sess) {
-  if (sess.wallets?.length > 0) {
-    const active = sess.activeWallet || sess.wallets[0].publicKey;
-    return reply(chatId,
-      `Welcome back to *Nox* ⚡\n\nActive wallet:\n\`${active}\`\n\nUse /help for commands.`
+  const hasWallets = sess.wallets?.length > 0;
+  const active = sess.activeWallet || sess.wallets?.[0]?.publicKey;
+  const greeting = hasWallets
+    ? `🌑 *Nox* ⚡\n\nYou have ${sess.wallets.length} wallet(s).\nActive:\n\`${active}\`\n\nAdd another or manage below:`
+    : '🌑 *Welcome to Nox*\n\nThe fastest Solana sniper bot.\n\nLet\'s set up your wallet:';
+
+  const buttons = [
+    [{ text: '🔑 Generate New Wallet', callback_data: 'onboard_generate' }],
+    [{ text: '📥 Import Private Key', callback_data: 'onboard_import' }],
+  ];
+  if (hasWallets) {
+    buttons.push(
+      [{ text: '💼 My Wallets', callback_data: 'cmd_wallets' }],
+      [{ text: '📖 Help', callback_data: 'cmd_help' }]
     );
   }
 
   return tg('sendMessage', {
     chat_id: chatId,
-    text: '🌑 *Welcome to Nox*\n\nThe fastest Solana sniper bot.\n\nLet\'s set up your wallet:',
+    text: greeting,
     parse_mode: 'Markdown',
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: '🔑 Generate New Wallet', callback_data: 'onboard_generate' }],
-        [{ text: '📥 Import Private Key', callback_data: 'onboard_import' }],
-      ],
-    },
+    reply_markup: { inline_keyboard: buttons },
   });
 }
 
 async function handleGenerate(chatId, sess) {
-  // Lazy-load crypto only when needed
   const { Keypair } = require('@solana/web3.js');
   const _bs58 = require('bs58');
   const bs58 = _bs58.default || _bs58;
@@ -214,25 +226,30 @@ async function handleGenerate(chatId, sess) {
   const secretKey = bs58.encode(keypair.secretKey);
   const encrypted = encryptPrivateKey(secretKey);
 
-  sess.wallets = [{ publicKey, ...encrypted, label: 'Main' }];
-  sess.activeWallet = publicKey;
-  sess.settings = defaultSettings();
+  const walletNum = (sess.wallets?.length || 0) + 1;
+  const label = walletNum === 1 ? 'Main' : `Wallet ${walletNum}`;
+  const wallet = { publicKey, ...encrypted, label };
 
-  // Save to MongoDB  
-  await saveUser(chatId, sess);
+  if (!sess.wallets) sess.wallets = [];
+  sess.wallets.push(wallet);
+  sess.activeWallet = publicKey;
+  if (!sess.settings) sess.settings = defaultSettings();
+
+  await saveWallet(chatId, wallet, sess);
 
   const sentMsg = await reply(chatId,
-    `✅ *Wallet Generated*\n\n` +
-    `Address: \`${publicKey}\`\n\n` +
+    `✅ *Wallet Generated* (${label})\n\n` +
+    `Address:\n\`${publicKey}\`\n\n` +
     `🔐 *SAVE YOUR PRIVATE KEY:*\n\`${secretKey}\`\n\n` +
     '⚠️ This message will be deleted in 60 seconds.'
   );
 
-  // Auto-delete private key message
   setTimeout(() => tg('deleteMessage', { chat_id: chatId, message_id: sentMsg.message_id }).catch(() => {}), 60_000);
 
   await reply(chatId,
-    '🎉 *Setup Complete!*\n\n🧪 Starting in *Dry Run* mode.\nUse `/dryrun off` for live trading.\nUse `/help` for all commands.'
+    `🎉 *${label} ready!*\n\n` +
+    `You have *${sess.wallets.length}* wallet(s).\n` +
+    '🧪 Dry Run mode is *ON*.\nUse `/help` for all commands.'
   );
 }
 
@@ -242,7 +259,6 @@ async function handleImport(chatId, sess) {
 }
 
 async function handleKeyImport(chatId, keyInput, msgId, sess) {
-  // Delete the key message immediately
   await tg('deleteMessage', { chat_id: chatId, message_id: msgId }).catch(() => {});
   sess.scene = null;
 
@@ -261,18 +277,35 @@ async function handleKeyImport(chatId, keyInput, msgId, sess) {
     const publicKey = keypair.publicKey.toBase58();
     const encrypted = encryptPrivateKey(keyInput);
 
-    sess.wallets = [{ publicKey, ...encrypted, label: 'Imported' }];
-    sess.activeWallet = publicKey;
-    sess.settings = defaultSettings();
+    // Check for duplicate
+    if (sess.wallets?.some(w => w.publicKey === publicKey)) {
+      return reply(chatId, `⚠️ This wallet is already added: \`${publicKey}\``);
+    }
 
-    await saveUser(chatId, sess);
+    const walletNum = (sess.wallets?.length || 0) + 1;
+    const label = walletNum === 1 ? 'Imported' : `Imported ${walletNum}`;
+    const wallet = { publicKey, ...encrypted, label };
+
+    if (!sess.wallets) sess.wallets = [];
+    sess.wallets.push(wallet);
+    sess.activeWallet = publicKey;
+    if (!sess.settings) sess.settings = defaultSettings();
+
+    await saveWallet(chatId, wallet, sess);
 
     await reply(chatId,
-      `✅ Wallet imported: \`${publicKey.slice(0, 8)}...\`\n⚠️ Your key message was deleted.\n\n` +
-      '🎉 *Setup Complete!*\n🧪 Starting in *Dry Run* mode.\nUse `/help` for commands.'
+      `✅ *Wallet imported* (${label})\n\n` +
+      `Address:\n\`${publicKey}\`\n` +
+      `⚠️ Your key message was deleted.\n\n` +
+      `You have *${sess.wallets.length}* wallet(s).\nUse \`/help\` for commands.`
     );
-  } catch {
-    await reply(chatId, '❌ Invalid private key. Send a valid Base58 key or use /start to try again.');
+  } catch (err) {
+    const hint = err.message?.includes('length') || err.message?.includes('size')
+      ? ' Expected 64 bytes (88 Base58 chars).'
+      : err.message?.includes('Non-base58')
+        ? ' Key contains invalid characters.'
+        : '';
+    await reply(chatId, `❌ Invalid private key.${hint}\nSend a valid Base58 key or use /start to try again.`);
   }
 }
 
@@ -370,8 +403,10 @@ async function handleHelp(chatId) {
       '  /copy `<wallet>` — Copy-trade a wallet\n\n' +
 
       '🔑 *Wallet*\n' +
-      '  /wallets — View wallets\n' +
-      '  /start — Add new wallet\n\n' +
+      '  /wallets — View all wallets & balances\n' +
+      '  /start — Setup / add wallet\n' +
+      '  /newwallet — Generate new wallet\n' +
+      '  /importwallet — Import private key\n\n' +
 
       '⚙️ *Config*\n' +
       '  /settings — View all settings\n' +
@@ -411,23 +446,30 @@ function defaultSettings() {
   return { slippage: 300, jitoTip: 1_000_000, snipeAmount: 0.1, autoSell: false, takeProfit: 100, stopLoss: 50, dryRun: true };
 }
 
-async function saveUser(chatId, sess) {
+async function saveSettings(chatId, settings) {
   try {
     await ensureMongo();
     const User = require('./models/User');
-    const w = sess.wallets[0];
+    await User.findOneAndUpdate({ telegramId: chatId }, { settings }, { upsert: true });
+  } catch (e) { log.warn({ error: e.message }, 'Settings save failed'); }
+}
+
+async function saveWallet(chatId, wallet, sess) {
+  try {
+    await ensureMongo();
+    const User = require('./models/User');
     await User.findOneAndUpdate(
       { telegramId: chatId },
       {
         telegramId: chatId,
-        $push: { wallets: { publicKey: w.publicKey, encryptedPrivateKey: w.encryptedPrivateKey, iv: w.iv, authTag: w.authTag, label: w.label, isDefault: true } },
+        $push: { wallets: { publicKey: wallet.publicKey, encryptedPrivateKey: wallet.encryptedPrivateKey, iv: wallet.iv, authTag: wallet.authTag, label: wallet.label, isDefault: true } },
         settings: sess.settings,
       },
       { upsert: true, new: true }
     );
-    log.info({ chatId, wallet: w.publicKey }, 'User saved');
+    log.info({ chatId, wallet: wallet.publicKey }, 'Wallet saved');
   } catch (err) {
-    log.error({ error: err.message }, 'User save failed');
+    log.error({ error: err.message }, 'Wallet save failed');
   }
 }
 
@@ -440,30 +482,13 @@ async function handleWallets(chatId, sess) {
   const rows = [];
   for (let i = 0; i < wallets.length; i++) {
     const w = wallets[i];
-    const isActive = w.publicKey === active ? ' ✅' : '';
+    const isActive = w.publicKey === active;
     const label = w.label || `Wallet ${i + 1}`;
-
-    // Fetch live SOL balance
-    let balanceStr = 'N/A';
-    try {
-      const rpcUrl = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
-      const res = await fetch(rpcUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0', id: 1,
-          method: 'getBalance',
-          params: [w.publicKey],
-        }),
-      });
-      const data = await res.json();
-      if (data.result?.value !== undefined) {
-        balanceStr = (data.result.value / 1e9).toFixed(4) + ' SOL';
-      }
-    } catch { /* RPC unavailable */ }
+    const bal = await getSolBalance(w.publicKey);
+    const balanceStr = bal > 0 ? `${bal.toFixed(4)} SOL` : '0 SOL';
 
     rows.push(
-      `${isActive ? '✅' : '🔑'} *${label}*${isActive}\n` +
+      `${isActive ? '✅' : '🔑'} *${label}*${isActive ? ' ✅' : ''}\n` +
       `\`${w.publicKey}\`\n` +
       `💰 Balance: \`${balanceStr}\``
     );
@@ -507,6 +532,7 @@ async function handleSettings(chatId, sess, parts) {
 
   if (cfg.type === 'bool') {
     sess.settings[cfg.key] = value === 'on' || value === 'true';
+    await saveSettings(chatId, sess.settings);
     return reply(chatId, `✅ *${cfg.label}* set to \`${sess.settings[cfg.key] ? 'ON' : 'OFF'}\``);
   }
 
@@ -515,6 +541,7 @@ async function handleSettings(chatId, sess, parts) {
     return reply(chatId, `❌ ${cfg.label} must be ${cfg.min}–${cfg.max} ${cfg.unit}.`);
   }
   sess.settings[cfg.key] = parsed;
+  await saveSettings(chatId, sess.settings);
   return reply(chatId, `✅ *${cfg.label}* set to \`${parsed} ${cfg.unit}\``);
 }
 
@@ -532,7 +559,7 @@ async function handleDryrun(chatId, sess, arg) {
   );
 }
 
-async function handlePnl(chatId, period) {
+async function handlePnl(chatId, userId, period) {
   try {
     await ensureMongo();
     const Trade = require('./models/Trade');
@@ -540,7 +567,7 @@ async function handlePnl(chatId, period) {
     const p = period || '7d';
     if (!periods.hasOwnProperty(p)) return reply(chatId, '📖 Usage: `/pnl [24h|7d|30d|all]`');
 
-    const query = { telegramId: chatId, status: 'filled', type: 'sell' };
+    const query = { telegramId: userId, status: 'filled', type: 'sell' };
     const ms = periods[p];
     if (ms) query.createdAt = { $gte: new Date(Date.now() - ms) };
 
@@ -563,12 +590,12 @@ async function handlePnl(chatId, period) {
   }
 }
 
-async function handlePositions(chatId) {
+async function handlePositions(chatId, userId) {
   try {
     await ensureMongo();
     const Trade = require('./models/Trade');
     const positions = await Trade.find({
-      telegramId: chatId, status: 'filled', type: 'buy', closedAt: { $exists: false },
+      telegramId: userId, status: 'filled', type: 'buy', closedAt: { $exists: false },
     }).sort({ createdAt: -1 }).limit(20).lean();
 
     if (!positions.length) return reply(chatId, '📭 No open positions.\n\nUse /buy to open one.');
@@ -584,6 +611,89 @@ async function handlePositions(chatId) {
     log.error({ error: err.message }, 'positions failed');
     await reply(chatId, '⚠️ Could not load positions.');
   }
+}
+
+// ─── Trading Infrastructure (lazy-loaded) ──────────
+
+const SOL_MINT = 'So11111111111111111111111111111111111111112';
+const MINT_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+function isValidMint(mint) {
+  return typeof mint === 'string' && MINT_RE.test(mint);
+}
+
+async function getSolBalance(publicKey) {
+  try {
+    const rpcUrl = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
+    const res = await fetch(rpcUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getBalance', params: [publicKey] }),
+    });
+    const data = await res.json();
+    return (data.result?.value || 0) / 1e9; // SOL
+  } catch { return 0; }
+}
+
+async function getTokenBalance(publicKey, mint) {
+  try {
+    const rpcUrl = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
+    const res = await fetch(rpcUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0', id: 1,
+        method: 'getTokenAccountsByOwner',
+        params: [publicKey, { mint }, { encoding: 'jsonParsed' }],
+      }),
+    });
+    const data = await res.json();
+    const accounts = data.result?.value || [];
+    if (!accounts.length) return { balance: 0, decimals: 0, raw: 0 };
+    const info = accounts[0].account.data.parsed.info;
+    return {
+      balance: parseFloat(info.tokenAmount.uiAmountString || '0'),
+      decimals: info.tokenAmount.decimals,
+      raw: parseInt(info.tokenAmount.amount, 10),
+    };
+  } catch { return { balance: 0, decimals: 0, raw: 0 }; }
+}
+
+function getKeypairFromSession(sess) {
+  const w = sess.wallets?.find(w => w.publicKey === sess.activeWallet) || sess.wallets?.[0];
+  if (!w) throw new Error('No wallet found');
+  const { decryptPrivateKey } = require('./utils/wallet-crypto');
+  const secretKeyBase58 = decryptPrivateKey(w);
+  const _bs58 = require('bs58');
+  const bs58 = _bs58.default || _bs58;
+  const { Keypair } = require('@solana/web3.js');
+  return Keypair.fromSecretKey(bs58.decode(secretKeyBase58));
+}
+
+async function executeSwap(swapTransactionBase64, keypair) {
+  const { VersionedTransaction } = require('@solana/web3.js');
+  const rpcUrl = process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com';
+
+  // Deserialize the Jupiter swap tx
+  const txBuf = Buffer.from(swapTransactionBase64, 'base64');
+  const tx = VersionedTransaction.deserialize(txBuf);
+  tx.sign([keypair]);
+
+  // Send transaction
+  const serialized = Buffer.from(tx.serialize()).toString('base64');
+  const sendRes = await fetch(rpcUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0', id: 1,
+      method: 'sendTransaction',
+      params: [serialized, { encoding: 'base64', skipPreflight: true, maxRetries: 3 }],
+    }),
+  });
+  const sendData = await sendRes.json();
+  if (sendData.error) throw new Error(sendData.error.message || 'Send failed');
+
+  return sendData.result; // transaction signature
 }
 
 // ─── On-Demand Data Fetchers ───────────────────────
@@ -642,6 +752,7 @@ async function handleKols(chatId) {
 
 async function handleToken(chatId, mint) {
   if (!mint) return reply(chatId, '📖 Usage: `/token <mint_address>`');
+  if (!isValidMint(mint)) return reply(chatId, '❌ Invalid token address. Must be a valid Solana mint (32-44 chars).');
 
   await reply(chatId, `🔍 Looking up \`${mint.slice(0, 8)}...\``);
 
@@ -671,6 +782,7 @@ async function handleToken(chatId, mint) {
       inline_keyboard: [
         [
           { text: '🟢 Buy', callback_data: `buy_${mint}` },
+          { text: '🎯 Snipe', callback_data: `snipe_${mint}` },
           { text: '🔴 Sell', callback_data: `sell_${mint}` },
         ],
         [
@@ -683,21 +795,25 @@ async function handleToken(chatId, mint) {
 
 async function handleBuy(chatId, sess, mint, amountArg) {
   if (!mint) return reply(chatId, '📖 Usage: `/buy <mint> [amount_sol]`');
+  if (!isValidMint(mint)) return reply(chatId, '❌ Invalid token address.');
 
-  // Fetch live token info
   const token = await fetchTokenFromDex(mint);
   const name = token ? `${token.name} (${token.symbol})` : `\`${mint.slice(0, 8)}...\``;
   const priceInfo = token ? `\nPrice: \`$${token.price}\`` : '';
-
   const amount = amountArg ? parseFloat(amountArg) : (sess.settings?.snipeAmount || 0.1);
+  const slippage = sess.settings?.slippage || 300;
+  const wallet = sess.activeWallet || sess.wallets?.[0]?.publicKey;
 
+  if (isNaN(amount) || amount <= 0) return reply(chatId, '❌ Invalid amount. Must be > 0 SOL.');
+
+  // Dry run mode
   if (sess.settings?.dryRun) {
     return tg('sendMessage', {
       chat_id: chatId,
       text:
         `🧪 *DRY RUN — Buy ${name}*${priceInfo}\n\n` +
         `Amount: \`${amount} SOL\`\n` +
-        `Slippage: \`${sess.settings?.slippage || 300} bps\`\n\n` +
+        `Slippage: \`${slippage} bps\`\n\n` +
         `_Use \`/dryrun off\` for live trades._`,
       parse_mode: 'Markdown',
       reply_markup: {
@@ -707,14 +823,101 @@ async function handleBuy(chatId, sess, mint, amountArg) {
       },
     });
   }
-  return reply(chatId, `⚡ Buy order for ${name} — Jupiter swap integration coming soon.`);
+
+  // LIVE MODE — Check balance first
+  const balance = await getSolBalance(wallet);
+  if (balance < 0.001) {
+    return reply(chatId,
+      `💸 *Wallet has no SOL*\n\n` +
+      `Deposit SOL to trade:\n\`${wallet}\`\n\n` +
+      `_Tap the address to copy._`
+    );
+  }
+  const estimatedFee = 0.005; // ~5000 lamports for rent + tx fee
+  if (balance < amount + estimatedFee) {
+    return reply(chatId,
+      `⚠️ *Insufficient SOL*\n\n` +
+      `Balance: \`${balance.toFixed(4)} SOL\`\n` +
+      `Needed: \`${(amount + estimatedFee).toFixed(4)} SOL\` (${amount} + fees)\n\n` +
+      `Deposit more SOL:\n\`${wallet}\``
+    );
+  }
+
+  // Execute via Jupiter
+  await reply(chatId, `⏳ Buying ${amount} SOL of ${name}...`);
+
+  try {
+    const { prepareBuy } = require('./services/jupiterSwap');
+    const amountLamports = Math.floor(amount * 1e9);
+    const { swapTransaction, outAmount, priceImpactPct } = await prepareBuy({
+      mint,
+      amountLamports,
+      wallet,
+      slippageBps: slippage,
+      priorityFee: sess.settings?.jitoTip || 1_000_000,
+    });
+
+    const keypair = getKeypairFromSession(sess);
+    const sig = await executeSwap(swapTransaction, keypair);
+    log.info({ chatId, mint, amount, sig }, 'Buy executed');
+
+    // Record trade
+    try {
+      await ensureMongo();
+      const Trade = require('./models/Trade');
+      await Trade.create({ telegramId: chatId, type: 'buy', mint, amountSol: amount, wallet, status: 'filled', source: 'manual', signature: sig });
+    } catch (e) { log.warn({ error: e.message }, 'Trade record failed'); }
+
+    const tokensReceived = outAmount ? (parseInt(outAmount, 10) / 1e6).toFixed(4) : '?';
+    const impact = priceImpactPct ? `\nPrice Impact: \`${parseFloat(priceImpactPct).toFixed(2)}%\`` : '';
+
+    return tg('sendMessage', {
+      chat_id: chatId,
+      text:
+        `✅ *Buy Successful!*\n\n` +
+        `Token: ${name}${priceInfo}\n` +
+        `Spent: \`${amount} SOL\`\n` +
+        `Received: \`~${tokensReceived}\`${impact}\n\n` +
+        `🔗 [View on Solscan](https://solscan.io/tx/${sig})`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🔴 Sell', callback_data: `sell_${mint}` }],
+          [{ text: '📊 Token Details', callback_data: `token_${mint}` }],
+        ],
+      },
+    });
+  } catch (err) {
+    log.error({ error: err.message, mint }, 'Buy failed');
+    const errMsg = err.message.includes('quote failed') || err.message.includes('No route')
+      ? '❌ No liquidity route found for this token.'
+      : err.message.includes('insufficient') || err.message.includes('0x1')
+        ? '❌ Insufficient funds or balance changed during swap.'
+        : err.message.includes('blockhash')
+          ? '⚠️ Network congestion — please try again.'
+          : `❌ Buy failed: \`${err.message.slice(0, 100)}\``;
+    return reply(chatId, errMsg);
+  }
 }
 
 async function handleSell(chatId, sess, mint, pctArg) {
   if (!mint) return reply(chatId, '📖 Usage: `/sell <mint> [percent]`');
+  if (!isValidMint(mint)) return reply(chatId, '❌ Invalid token address.');
   const token = await fetchTokenFromDex(mint);
   const name = token ? `${token.name} (${token.symbol})` : `\`${mint.slice(0, 8)}...\``;
   const priceInfo = token ? `\nPrice: \`$${token.price}\`` : '';
+  const wallet = sess.activeWallet || sess.wallets?.[0]?.publicKey;
+
+  // Check token balance before showing sell UI
+  if (!sess.settings?.dryRun) {
+    const { balance } = await getTokenBalance(wallet, mint);
+    if (balance <= 0) {
+      return reply(chatId,
+        `📭 *No ${name} holdings*\n\n` +
+        `Your wallet doesn't hold this token.\nUse /buy to purchase first.`
+      );
+    }
+  }
 
   // If percent given, execute directly
   if (pctArg) {
@@ -745,21 +948,103 @@ async function handleSell(chatId, sess, mint, pctArg) {
 async function handleSellExecute(chatId, sess, mint, pct) {
   const token = await fetchTokenFromDex(mint);
   const name = token ? `${token.name} (${token.symbol})` : `\`${mint.slice(0, 8)}...\``;
+  const wallet = sess.activeWallet || sess.wallets?.[0]?.publicKey;
+  const slippage = sess.settings?.slippage || 300;
 
   if (sess.settings?.dryRun) {
-    return reply(chatId, `🧪 *DRY RUN* — Would sell ${pct}% of ${name}\n\nSlippage: \`${sess.settings?.slippage || 300} bps\`\n\n_Use \`/dryrun off\` for live trades._`);
+    return reply(chatId, `🧪 *DRY RUN* — Would sell ${pct}% of ${name}\n\nSlippage: \`${slippage} bps\`\n\n_Use \`/dryrun off\` for live trades._`);
   }
-  return reply(chatId, `⚡ Sell ${pct}% of ${name} — Jupiter swap integration coming soon.`);
+
+  // LIVE MODE — Check token balance
+  const { balance, raw, decimals } = await getTokenBalance(wallet, mint);
+  if (balance <= 0) {
+    return reply(chatId,
+      `📭 *No ${name} holdings*\n\nYour wallet doesn't hold this token.`
+    );
+  }
+
+  // Check SOL for fees
+  const solBal = await getSolBalance(wallet);
+  if (solBal < 0.003) {
+    return reply(chatId,
+      `⚠️ *Need SOL for gas fees*\n\n` +
+      `SOL Balance: \`${solBal.toFixed(4)}\`\n` +
+      `Deposit SOL:\n\`${wallet}\``
+    );
+  }
+
+  const sellAmount = Math.floor(raw * pct / 100);
+  if (sellAmount <= 0) return reply(chatId, '❌ Amount too small to sell.');
+
+  await reply(chatId, `⏳ Selling ${pct}% of ${name} (${(balance * pct / 100).toFixed(4)} tokens)...`);
+
+  try {
+    const { prepareSell } = require('./services/jupiterSwap');
+    const { swapTransaction, outAmount, priceImpactPct } = await prepareSell({
+      mint,
+      amountTokenSmallestUnit: sellAmount,
+      wallet,
+      slippageBps: slippage,
+      priorityFee: sess.settings?.jitoTip || 1_000_000,
+    });
+
+    const keypair = getKeypairFromSession(sess);
+    const sig = await executeSwap(swapTransaction, keypair);
+    log.info({ chatId, mint, pct, sig }, 'Sell executed');
+
+    // Record trade
+    try {
+      await ensureMongo();
+      const Trade = require('./models/Trade');
+      const solReceived = outAmount ? parseInt(outAmount, 10) / 1e9 : 0;
+      await Trade.create({ telegramId: chatId, type: 'sell', mint, amountSol: solReceived, wallet, status: 'filled', source: 'manual', signature: sig });
+    } catch (e) { log.warn({ error: e.message }, 'Trade record failed'); }
+
+    const solReceived = outAmount ? (parseInt(outAmount, 10) / 1e9).toFixed(4) : '?';
+    const impact = priceImpactPct ? `\nPrice Impact: \`${parseFloat(priceImpactPct).toFixed(2)}%\`` : '';
+
+    return tg('sendMessage', {
+      chat_id: chatId,
+      text:
+        `✅ *Sell Successful!*\n\n` +
+        `Token: ${name}\n` +
+        `Sold: \`${pct}%\` (${(balance * pct / 100).toFixed(4)} tokens)\n` +
+        `Received: \`~${solReceived} SOL\`${impact}\n\n` +
+        `🔗 [View on Solscan](https://solscan.io/tx/${sig})`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          pct < 100 ? [{ text: '🔴 Sell More', callback_data: `sell_${mint}` }] : [],
+          [{ text: '📊 Token Details', callback_data: `token_${mint}` }],
+        ].filter(row => row.length),
+      },
+    });
+  } catch (err) {
+    log.error({ error: err.message, mint }, 'Sell failed');
+    const errMsg = err.message.includes('quote failed') || err.message.includes('No route')
+      ? '❌ No liquidity route found for this token.'
+      : err.message.includes('insufficient') || err.message.includes('0x1')
+        ? '❌ Insufficient balance — token amount may have changed.'
+        : err.message.includes('blockhash')
+          ? '⚠️ Network congestion — please try again.'
+          : `❌ Sell failed: \`${err.message.slice(0, 100)}\``;
+    return reply(chatId, errMsg);
+  }
 }
 
 async function handleSnipe(chatId, sess, mint, amountArg) {
-  if (!mint) return reply(chatId, '📖 *Snipe Usage*\n\n`/snipe <mint> [sol_amount]`\n`/s <mint> [sol_amount]`\n\nUses Jito bundle for priority execution.');
+  if (!mint) return reply(chatId, '📖 *Snipe Usage*\n\n`/snipe <mint> [sol_amount]`\n`/s <mint> [sol_amount]`\n\nUses Jito private mempool for MEV-protected execution.');
+  if (!isValidMint(mint)) return reply(chatId, '❌ Invalid token address.');
 
   const token = await fetchTokenFromDex(mint);
   const name = token ? `${token.name} (${token.symbol})` : `\`${mint.slice(0, 8)}...\``;
   const priceInfo = token ? `\nPrice: \`$${token.price}\`` : '';
-
   const amount = amountArg ? parseFloat(amountArg) : (sess.settings?.snipeAmount || 0.1);
+  const slippage = sess.settings?.slippage || 300;
+  const jitoTip = sess.settings?.jitoTip || 1_000_000;
+  const wallet = sess.activeWallet || sess.wallets?.[0]?.publicKey;
+
+  if (isNaN(amount) || amount <= 0) return reply(chatId, '❌ Invalid amount.');
 
   if (sess.settings?.dryRun) {
     return tg('sendMessage', {
@@ -767,9 +1052,8 @@ async function handleSnipe(chatId, sess, mint, amountArg) {
       text:
         `🧪 *DRY RUN — Snipe ${name}*${priceInfo}\n\n` +
         `🎯 Amount: \`${amount} SOL\`\n` +
-        `⚡ Jito Tip: \`${sess.settings?.jitoTip || 1000000} lamports\`\n` +
-        `📊 Slippage: \`${sess.settings?.slippage || 300} bps\`\n\n` +
-        `_Priority execution via Jito bundles._\n` +
+        `⚡ Priority Fee: \`${jitoTip} lamports\`\n` +
+        `📊 Slippage: \`${slippage} bps\`\n\n` +
         `_Use \`/dryrun off\` for live trades._`,
       parse_mode: 'Markdown',
       reply_markup: {
@@ -779,14 +1063,110 @@ async function handleSnipe(chatId, sess, mint, amountArg) {
       },
     });
   }
-  return reply(chatId, `🎯 Snipe order for ${name} — Jito bundle integration coming soon.`);
+
+  // LIVE MODE — Check balance
+  const balance = await getSolBalance(wallet);
+  const totalNeeded = amount + (jitoTip / 1e9) + 0.005;
+  if (balance < 0.001) {
+    return reply(chatId,
+      `💸 *Wallet has no SOL*\n\nDeposit SOL to snipe:\n\`${wallet}\``
+    );
+  }
+  if (balance < totalNeeded) {
+    return reply(chatId,
+      `⚠️ *Insufficient SOL for snipe*\n\n` +
+      `Balance: \`${balance.toFixed(4)} SOL\`\n` +
+      `Needed: \`~${totalNeeded.toFixed(4)} SOL\` (${amount} + priority fee + gas)\n\n` +
+      `Deposit more:\n\`${wallet}\``
+    );
+  }
+
+  await reply(chatId, `🎯 Sniping ${amount} SOL of ${name} with priority fee...`);
+
+  try {
+    const { prepareBuy } = require('./services/jupiterSwap');
+    const amountLamports = Math.floor(amount * 1e9);
+    const { swapTransaction, outAmount, priceImpactPct } = await prepareBuy({
+      mint,
+      amountLamports,
+      wallet,
+      slippageBps: slippage,
+      priorityFee: jitoTip,
+    });
+
+    const keypair = getKeypairFromSession(sess);
+
+    // Use Jito blast for MEV-protected execution (5 endpoints in parallel)
+    const { VersionedTransaction } = require('@solana/web3.js');
+    const txBuf = Buffer.from(swapTransaction, 'base64');
+    const tx = VersionedTransaction.deserialize(txBuf);
+    tx.sign([keypair]);
+    const signedBase64 = Buffer.from(tx.serialize()).toString('base64');
+
+    let sig;
+    try {
+      const { blastJitoBundle } = require('./execution/jito-blast');
+      const jitoResult = await blastJitoBundle([signedBase64]);
+      sig = jitoResult.bundleId;
+      log.info({ chatId, mint, amount, jitoTip, bundleId: sig, endpoint: jitoResult.endpoint, latencyMs: jitoResult.latencyMs }, 'Snipe via Jito blast');
+    } catch (jitoErr) {
+      // Fallback to normal RPC if Jito fails
+      log.warn({ error: jitoErr.message }, 'Jito blast failed, falling back to RPC');
+      sig = await executeSwap(swapTransaction, keypair);
+      log.info({ chatId, mint, amount, sig }, 'Snipe via RPC fallback');
+    }
+
+    // Record trade
+    try {
+      await ensureMongo();
+      const Trade = require('./models/Trade');
+      await Trade.create({ telegramId: chatId, type: 'buy', mint, amountSol: amount, wallet, status: 'filled', source: 'snipe', signature: sig });
+    } catch (e) { log.warn({ error: e.message }, 'Trade record failed'); }
+
+    const tokensReceived = outAmount ? (parseInt(outAmount, 10) / 1e6).toFixed(4) : '?';
+    const impact = priceImpactPct ? `\nPrice Impact: \`${parseFloat(priceImpactPct).toFixed(2)}%\`` : '';
+
+    return tg('sendMessage', {
+      chat_id: chatId,
+      text:
+        `🎯 *Snipe Successful!*\n\n` +
+        `Token: ${name}${priceInfo}\n` +
+        `Spent: \`${amount} SOL\`\n` +
+        `Received: \`~${tokensReceived}\`\n` +
+        `Priority Fee: \`${jitoTip} lamports\`${impact}\n\n` +
+        `🔗 [View on Solscan](https://solscan.io/tx/${sig})`,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🔴 Sell', callback_data: `sell_${mint}` }],
+          [{ text: '📊 Token Details', callback_data: `token_${mint}` }],
+        ],
+      },
+    });
+  } catch (err) {
+    log.error({ error: err.message, mint }, 'Snipe failed');
+    const errMsg = err.message.includes('quote failed') || err.message.includes('No route')
+      ? '❌ No liquidity route — token may not be tradeable yet.'
+      : err.message.includes('insufficient') || err.message.includes('0x1')
+        ? '❌ Insufficient funds or balance changed during swap.'
+        : err.message.includes('blockhash')
+          ? '⚠️ Network congestion — retry the snipe.'
+          : `❌ Snipe failed: \`${err.message.slice(0, 100)}\``;
+    return reply(chatId, errMsg);
+  }
 }
 
-async function handleCopy(chatId, sess, targetWallet) {
+async function handleCopy(chatId, sess, args) {
+  if (!sess.wallets?.length) {
+    return reply(chatId, '🔑 Set up a wallet first. Use /start.');
+  }
+
   await ensureMongo();
   const User = require('./models/User');
   const user = await User.findOne({ telegramId: chatId }).lean();
   const copies = user?.copyTargets || [];
+
+  const targetWallet = Array.isArray(args) ? args[0] : args;
 
   if (!targetWallet) {
     // Show current copy targets
@@ -794,47 +1174,69 @@ async function handleCopy(chatId, sess, targetWallet) {
       return reply(chatId,
         '📋 *Copy Trading*\n━━━━━━━━━━━━━━━━━━\n\n' +
         'No copy targets set.\n\n' +
-        '`/copy <wallet>` — Start copy trading a KOL or smart wallet.\n\n' +
+        '`/copy <wallet>` — Start copy trading\n' +
+        '`/copy <wallet> <multiplier> <maxSol>` — Custom config\n\n' +
         '_Tip: Use /kols to find top-performing wallets._'
       );
     }
 
-    const list = copies.map((c, i) =>
-      `${i + 1}. \`${c.kolWallet.slice(0, 8)}...\` (${c.multiplier || 1}x, ${c.enabled ? '🟢 Active' : '⭕ Paused'})`
-    ).join('\n');
+    const list = copies.map((c, i) => {
+      const addr = `${c.kolWallet.slice(0, 6)}...${c.kolWallet.slice(-4)}`;
+      const status = c.enabled ? '🟢 Active' : '⭕ Paused';
+      return `${i + 1}. \`${addr}\` ${status}\n   ${c.multiplier || 1}x · Max: ${c.maxSol || 0.5} SOL`;
+    }).join('\n');
 
     const buttons = copies.flatMap(c => [
       [
         { text: `${c.enabled ? '⭕ Pause' : '🟢 Enable'} ${c.kolWallet.slice(0, 6)}...`, callback_data: `copy_toggle_${c.kolWallet}` },
-        { text: `🗑 Remove`, callback_data: `copy_remove_${c.kolWallet}` },
+        { text: '🗑 Remove', callback_data: `copy_remove_${c.kolWallet}` },
       ],
     ]);
+    buttons.push([{ text: '🔄 Refresh', callback_data: 'cmd_copy' }]);
 
     return tg('sendMessage', {
       chat_id: chatId,
-      text: `📋 *Copy Targets*\n━━━━━━━━━━━━━━━━━━\n\n${list}`,
+      text: `📋 *Copy Targets (${copies.length})*\n━━━━━━━━━━━━━━━━━━\n\n${list}\n\n_Use \`/copy <wallet>\` to add more._`,
       parse_mode: 'Markdown',
       reply_markup: { inline_keyboard: buttons },
     });
   }
 
-  // Add new copy target
-  if (targetWallet.length < 32 || targetWallet.length > 44) {
-    return reply(chatId, '❌ Invalid wallet address.');
+  // Add new copy target — /copy <wallet> [multiplier] [maxSol]
+  const wallet = targetWallet;
+  const multiplier = Array.isArray(args) && args[1] ? parseFloat(args[1]) : 1;
+  const maxSol = Array.isArray(args) && args[2] ? parseFloat(args[2]) : 0.5;
+
+  if (!isValidMint(wallet)) {
+    return reply(chatId, '❌ Invalid wallet address. Must be a valid Solana address (32-44 chars).');
+  }
+
+  if (multiplier <= 0 || multiplier > 10) {
+    return reply(chatId, '❌ Multiplier must be between 0.1 and 10.');
+  }
+
+  if (maxSol <= 0 || maxSol > 100) {
+    return reply(chatId, '❌ Max SOL must be between 0.01 and 100.');
+  }
+
+  // Check for duplicate
+  if (copies.some(c => c.kolWallet === wallet)) {
+    return reply(chatId, `⚠️ Already copy-trading this wallet:\n\`${wallet}\`\n\nUse /copy to manage targets.`);
   }
 
   try {
     await User.findOneAndUpdate(
       { telegramId: chatId },
-      { $push: { copyTargets: { kolWallet: targetWallet, multiplier: 1, maxSol: 0.5, enabled: true } } }
+      { $push: { copyTargets: { kolWallet: wallet, multiplier, maxSol, enabled: true } } }
     );
-    log.info({ chatId, target: targetWallet }, 'Copy target added');
+    log.info({ chatId, target: wallet, multiplier, maxSol }, 'Copy target added');
     return reply(chatId,
       `✅ *Copy target added*\n\n` +
-      `Wallet: \`${targetWallet.slice(0, 8)}...\`\n` +
-      `Multiplier: 1x\nMax: 0.5 SOL\n\n` +
-      `_Note: Copy-trading executes when the engine is running._\n` +
-      `Use \`/copy\` to see all targets.`
+      `Wallet:\n\`${wallet}\`\n` +
+      `Multiplier: \`${multiplier}x\`\n` +
+      `Max per trade: \`${maxSol} SOL\`\n\n` +
+      `_Copy-trading mirrors the target's buys._\n` +
+      `Use \`/copy\` to manage all targets.`
     );
   } catch (err) {
     log.error({ error: err.message }, 'copy add failed');
@@ -852,7 +1254,13 @@ async function handleCopyToggle(chatId, wallet) {
 
     target.enabled = !target.enabled;
     await user.save();
-    return reply(chatId, `${target.enabled ? '🟢' : '⭕'} Copy target \`${wallet.slice(0, 8)}...\` ${target.enabled ? 'enabled' : 'paused'}.`);
+
+    const addr = `${wallet.slice(0, 6)}...${wallet.slice(-4)}`;
+    await reply(chatId, `${target.enabled ? '🟢' : '⭕'} Copy target \`${addr}\` ${target.enabled ? 'enabled' : 'paused'}.`);
+
+    // Refresh the list
+    const sess = getSession(chatId);
+    return handleCopy(chatId, sess, null);
   } catch (err) {
     log.error({ error: err.message }, 'copy toggle failed');
     return reply(chatId, '⚠️ Could not update copy target.');
@@ -867,7 +1275,13 @@ async function handleCopyRemove(chatId, wallet) {
       { telegramId: chatId },
       { $pull: { copyTargets: { kolWallet: wallet } } }
     );
-    return reply(chatId, `🗑 Removed copy target \`${wallet.slice(0, 8)}...\``);
+
+    const addr = `${wallet.slice(0, 6)}...${wallet.slice(-4)}`;
+    await reply(chatId, `🗑 Removed copy target \`${addr}\``);
+
+    // Refresh the list
+    const sess = getSession(chatId);
+    return handleCopy(chatId, sess, null);
   } catch (err) {
     log.error({ error: err.message }, 'copy remove failed');
     return reply(chatId, '⚠️ Could not remove copy target.');
